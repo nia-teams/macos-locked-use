@@ -1,0 +1,286 @@
+// Target-only input; adapted from the MIT-licensed upstream recipes.
+import ApplicationServices
+import CoreGraphics
+import Darwin
+import Foundation
+
+struct SkyLightActivationCommand: Equatable {
+    let psn: [UInt8]
+    let windowID: CGWindowID
+    let focused: Bool
+}
+
+struct SkyLightSyntheticFocusContext {
+    let deactivateTarget: SkyLightActivationCommand
+}
+
+struct SkyLightSyntheticFocusPlan: Equatable {
+    let activateTarget: SkyLightActivationCommand
+    let deactivateTarget: SkyLightActivationCommand
+}
+
+func skyLightSyntheticTargetFocusPlan(
+    targetPSN: [UInt8],
+    targetWindowID: CGWindowID
+) -> SkyLightSyntheticFocusPlan {
+    SkyLightSyntheticFocusPlan(
+        activateTarget: SkyLightActivationCommand(
+            psn: targetPSN,
+            windowID: targetWindowID,
+            focused: true
+        ),
+        deactivateTarget: SkyLightActivationCommand(
+            psn: targetPSN,
+            windowID: targetWindowID,
+            focused: false
+        )
+    )
+}
+
+func skyLightActivationRecord(windowID: CGWindowID, focused: Bool) -> [UInt8] {
+    var record = [UInt8](repeating: 0, count: 0xF8)
+    record[0x04] = 0xF8
+    record[0x08] = 0x0D
+    record[0x3C] = UInt8(truncatingIfNeeded: windowID)
+    record[0x3D] = UInt8(truncatingIfNeeded: windowID >> 8)
+    record[0x3E] = UInt8(truncatingIfNeeded: windowID >> 16)
+    record[0x3F] = UInt8(truncatingIfNeeded: windowID >> 24)
+    record[0x8A] = focused ? 0x01 : 0x02
+    return record
+}
+
+/// yabai's `window_manager_make_key_window` record pair. Posted to the target
+/// PSN after the app-activation record, it makes AppKit inside the target treat
+/// `windowID` as its key window without a front-process switch or raise. This
+/// is what Chromium's page focus keys off (`OnWindowIsKeyChanged`), so it is
+/// the difference between key events being received and text being inserted.
+func skyLightKeyWindowRecords(windowID: CGWindowID) -> [[UInt8]] {
+    var record = [UInt8](repeating: 0, count: 0xF8)
+    record[0x04] = 0xF8
+    record[0x3A] = 0x10
+    record[0x3C] = UInt8(truncatingIfNeeded: windowID)
+    record[0x3D] = UInt8(truncatingIfNeeded: windowID >> 8)
+    record[0x3E] = UInt8(truncatingIfNeeded: windowID >> 16)
+    record[0x3F] = UInt8(truncatingIfNeeded: windowID >> 24)
+    for index in 0x20..<0x30 {
+        record[index] = 0xFF
+    }
+    return [UInt8(0x01), UInt8(0x02)].map { eventKind in
+        var copy = record
+        copy[0x08] = eventKind
+        return copy
+    }
+}
+
+struct LockedUseInputSPICapability: Equatable, Sendable {
+    let missingSymbols: [String]
+    var feature: String = "click"
+
+    var isAvailable: Bool {
+        missingSymbols.isEmpty
+    }
+
+    var unavailableReason: String {
+        if missingSymbols.isEmpty {
+            return "available"
+        }
+
+        return "missing private \(feature) symbols: \(missingSymbols.joined(separator: ", "))"
+    }
+}
+
+/// Runtime-only bridge for the private SkyLight functions used by `sky_click`
+/// and `sky_key`.
+///
+/// The declarations, event-field recipe and key-window records are derived
+/// from the MIT-licensed Cua Driver and yabai implementations. Keep all
+/// undocumented ABI in this file so a future macOS compatibility change has
+/// one review boundary.
+final class LockedUseInputSPI: @unchecked Sendable {
+    static let shared = LockedUseInputSPI()
+
+    private static let frameworkPath = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
+    private static let postToPidSymbol = "SLEventPostToPid"
+    private static let setIntegerFieldSymbol = "SLEventSetIntegerValueField"
+    private static let setWindowLocationSymbol = "CGEventSetWindowLocation"
+    private static let postEventRecordSymbol = "SLPSPostEventRecordTo"
+    private static let getProcessForPIDSymbol = "GetProcessForPID"
+    private static let applicationServicesPath = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+
+    private typealias PostToPidFunction = @convention(c) (pid_t, UnsafeMutableRawPointer?) -> Void
+    private typealias SetIntegerFieldFunction = @convention(c) (UnsafeMutableRawPointer?, UInt32, Int64) -> Void
+    // Cua's current Rust bridge models this private ABI as
+    // (CGEventRef, double x, double y). Keeping the scalar form here avoids
+    // relying on Swift's aggregate CGPoint calling convention.
+    private typealias SetWindowLocationFunction = @convention(c) (UnsafeMutableRawPointer?, Double, Double) -> Void
+    private typealias PostEventRecordFunction = @convention(c) (UnsafeRawPointer?, UnsafePointer<UInt8>?) -> Int32
+    private typealias GetProcessForPIDFunction = @convention(c) (pid_t, UnsafeMutableRawPointer?) -> Int32
+    private let frameworkHandle: UnsafeMutableRawPointer?
+    private let applicationServicesHandle: UnsafeMutableRawPointer?
+    private let postToPidFunction: PostToPidFunction?
+    private let setIntegerFieldFunction: SetIntegerFieldFunction?
+    private let setWindowLocationFunction: SetWindowLocationFunction?
+    private let postEventRecordFunction: PostEventRecordFunction?
+    private let getProcessForPIDFunction: GetProcessForPIDFunction?
+    let capability: LockedUseInputSPICapability
+    private init() {
+        let handle = dlopen(Self.frameworkPath, RTLD_LAZY | RTLD_GLOBAL)
+        let appServicesHandle = dlopen(Self.applicationServicesPath, RTLD_LAZY | RTLD_GLOBAL)
+        frameworkHandle = handle
+        applicationServicesHandle = appServicesHandle
+        postToPidFunction = Self.resolve(handle: handle, symbol: Self.postToPidSymbol)
+        setIntegerFieldFunction = Self.resolve(handle: handle, symbol: Self.setIntegerFieldSymbol)
+        setWindowLocationFunction = Self.resolve(handle: handle, symbol: Self.setWindowLocationSymbol)
+        postEventRecordFunction = Self.resolve(handle: handle, symbol: Self.postEventRecordSymbol)
+        getProcessForPIDFunction = Self.resolve(handle: appServicesHandle, symbol: Self.getProcessForPIDSymbol)
+        var missingSymbols: [String] = []
+        if postToPidFunction == nil {
+            missingSymbols.append(Self.postToPidSymbol)
+        }
+        if setIntegerFieldFunction == nil {
+            missingSymbols.append(Self.setIntegerFieldSymbol)
+        }
+        if setWindowLocationFunction == nil {
+            missingSymbols.append(Self.setWindowLocationSymbol)
+        }
+        if postEventRecordFunction == nil {
+            missingSymbols.append(Self.postEventRecordSymbol)
+        }
+        if getProcessForPIDFunction == nil {
+            missingSymbols.append(Self.getProcessForPIDSymbol)
+        }
+        capability = LockedUseInputSPICapability(missingSymbols: missingSymbols)
+
+    }
+
+    func postToPid(_ event: CGEvent, pid: pid_t) throws {
+        try requireUsableComputerUseSession()
+        guard let postToPidFunction else {
+            throw unavailableError()
+        }
+
+        postToPidFunction(pid, opaquePointer(for: event))
+    }
+
+    func setIntegerField(_ event: CGEvent, field: UInt32, value: Int64) throws {
+        try LockedUseActionScope.validate()
+        guard let setIntegerFieldFunction else {
+            throw unavailableError()
+        }
+
+        setIntegerFieldFunction(opaquePointer(for: event), field, value)
+    }
+
+    func setWindowLocation(_ event: CGEvent, point: CGPoint) throws {
+        try LockedUseActionScope.validate()
+        guard let setWindowLocationFunction else {
+            throw unavailableError()
+        }
+
+        setWindowLocationFunction(opaquePointer(for: event), point.x, point.y)
+    }
+
+    func beginSyntheticTargetFocus(
+        targetPID: pid_t,
+        targetWindowID: CGWindowID
+    ) throws -> SkyLightSyntheticFocusContext {
+        guard let getProcessForPIDFunction else {
+            throw unavailableError()
+        }
+
+        var targetPSN = [UInt8](repeating: 0, count: 8)
+        let targetStatus = targetPSN.withUnsafeMutableBytes { bytes in
+            getProcessForPIDFunction(targetPID, bytes.baseAddress)
+        }
+        guard targetStatus == 0 else {
+            throw LockedUseError.message(
+                "click_method 'sky_click' could not resolve target PID \(targetPID) to a PSN (OSStatus \(targetStatus))"
+            )
+        }
+
+        let plan = skyLightSyntheticTargetFocusPlan(
+            targetPSN: targetPSN,
+            targetWindowID: targetWindowID
+        )
+        try postActivationCommand(plan.activateTarget)
+        if LockedUseInputTiming.focusRecordSettle > 0 {
+            Thread.sleep(forTimeInterval: LockedUseInputTiming.focusRecordSettle)
+        }
+
+        return SkyLightSyntheticFocusContext(
+            deactivateTarget: plan.deactivateTarget
+        )
+    }
+
+    /// Make the target window key inside the target app while it is in the
+    /// synthetic-active state. Must follow `beginSyntheticTargetFocus`; posted
+    /// the other way round the records are ignored. `endSyntheticTargetFocus`
+    /// releases the key state again (the target sees resignKey/blur).
+    func makeSyntheticTargetWindowKey(_ context: SkyLightSyntheticFocusContext) throws {
+        guard let postEventRecordFunction else {
+            throw unavailableError()
+        }
+
+        let command = context.deactivateTarget
+        for record in skyLightKeyWindowRecords(windowID: command.windowID) {
+            try LockedUseActionScope.validate()
+            let status = command.psn.withUnsafeBytes { psnBytes in
+                record.withUnsafeBufferPointer { recordBytes in
+                    postEventRecordFunction(psnBytes.baseAddress, recordBytes.baseAddress)
+                }
+            }
+            guard status == 0 else {
+                throw LockedUseError.message(
+                    "key_method 'sky_key' synthetic key-window event failed (OSStatus \(status))"
+                )
+            }
+        }
+    }
+
+    func endSyntheticTargetFocus(_ context: SkyLightSyntheticFocusContext) throws {
+        try postActivationCommand(context.deactivateTarget)
+        if LockedUseInputTiming.focusRecordSettle > 0 {
+            Thread.sleep(forTimeInterval: LockedUseInputTiming.focusRecordSettle)
+        }
+    }
+
+    private func unavailableError() -> LockedUseError {
+        LockedUseError.message(
+            "click_method 'sky_click' is unavailable: \(capability.unavailableReason)"
+        )
+    }
+
+    private func opaquePointer(for event: CGEvent) -> UnsafeMutableRawPointer {
+        Unmanaged.passUnretained(event).toOpaque()
+    }
+
+    private func postActivationCommand(_ command: SkyLightActivationCommand) throws {
+        try LockedUseActionScope.validate()
+        guard let postEventRecordFunction else {
+            throw unavailableError()
+        }
+
+        let record = skyLightActivationRecord(
+            windowID: command.windowID,
+            focused: command.focused
+        )
+        let status = command.psn.withUnsafeBytes { psnBytes in
+            record.withUnsafeBufferPointer { recordBytes in
+                postEventRecordFunction(psnBytes.baseAddress, recordBytes.baseAddress)
+            }
+        }
+        guard status == 0 else {
+            throw LockedUseError.message(
+                "click_method 'sky_click' synthetic target-focus event failed (OSStatus \(status))"
+            )
+        }
+    }
+
+    private static func resolve<T>(handle: UnsafeMutableRawPointer?, symbol: String) -> T? {
+        guard let handle, let pointer = dlsym(handle, symbol) else {
+            return nil
+        }
+
+        return unsafeBitCast(pointer, to: T.self)
+    }
+}
