@@ -75,6 +75,10 @@ public enum LockedUseSettings {
             FileManager.default.fileExists(atPath: "/Library/Security/SecurityAgentPlugins/LockedUseAuth.bundle") ||
             FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.nia-teams.locked-use.broker.plist")
         let preinstalledCommand = existingInstalled ? (quote(stage + "/LockedUseInstaller") + " uninstall\n") : ""
+        // Clear helper ACLs while staging is still symlink-free. Darwin's
+        // recursive ACL removal can dereference links despite a physical walk.
+        // The app is copied with --noacl afterward; its link ACLs are validated
+        // by the installer, never normalized through an unvalidated target.
         let shell = "set -eu\numask 077\n" +
             "/bin/test ! -L " + quote(stageParent) + "\n" +
             "/bin/mkdir -p " + quote(stageParent) + "\n" +
@@ -83,12 +87,18 @@ public enum LockedUseSettings {
             "/bin/chmod 700 " + quote(stageParent) + "\n" +
             "/bin/mkdir " + quote(stage) + "\n" +
             "trap " + quote("/bin/rm -rf " + quote(stage)) + " EXIT\n" +
-            "/usr/bin/ditto " + quote(source.path) + " " + quote(stage) + "\n" +
-            "/usr/bin/ditto " + quote(LockedUseHost.currentBundle.bundleURL.path) + " " + quote(stage + "/Client.app") + "\n" +
-            "/usr/bin/find " + quote(stage) + " -type l -print -quit | /usr/bin/awk 'END { exit(NR != 0) }'\n" +
+            "/usr/bin/ditto --noacl " + quote(source.path) + " " + quote(stage) + "\n" +
+            "/bin/test ! -L " + quote(stage + "/Client.app") + "\n" +
+            "/bin/test ! -e " + quote(stage + "/Client.app") + "\n" +
+            "/usr/bin/find -P " + quote(stage) + " -path " + quote(stage + "/Client.app") + " -prune -o -type l -print -quit | /usr/bin/awk 'END { exit(NR != 0) }'\n" +
             "/usr/sbin/chown -hR -P root:wheel " + quote(stage) + "\n" +
-            "/bin/chmod -RN " + quote(stage) + "\n" +
-            "/bin/chmod -R go-w " + quote(stage) + "\n" +
+            "/bin/chmod -R -P -N " + quote(stage) + "\n" +
+            "/usr/bin/ditto --noacl " + quote(LockedUseHost.currentBundle.bundleURL.path) + " " + quote(stage + "/Client.app") + "\n" +
+            "/bin/test ! -L " + quote(stage + "/Client.app") + "\n" +
+            "/bin/test -d " + quote(stage + "/Client.app") + "\n" +
+            "/usr/bin/find -P " + quote(stage) + " -path " + quote(stage + "/Client.app") + " -prune -o -type l -print -quit | /usr/bin/awk 'END { exit(NR != 0) }'\n" +
+            "/usr/sbin/chown -hR -P root:wheel " + quote(stage) + "\n" +
+            "/bin/chmod -R -P go-w " + quote(stage) + "\n" +
             "/usr/bin/codesign --verify --strict -R " + quote(requirement) + " " + quote(stage + "/LockedUseInstaller") + "\n" +
             (recovering ? (quote(stage + "/LockedUseInstaller") + " recover") : (preinstalledCommand + quote(stage + "/LockedUseInstaller") + " install " + quote(stage) + " " + String(identity.userID) + " " + "production " + quote(host)))
         try elevate(shell)

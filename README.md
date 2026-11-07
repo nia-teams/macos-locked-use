@@ -141,7 +141,7 @@ Native macOS applications (`YourApp.app`) can embed `LockedUseKit` in-process; t
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/nia-teams/macos-locked-use.git", from: "0.1.0")
+    .package(url: "https://github.com/nia-teams/macos-locked-use.git", from: "0.1.1")
 ],
 targets: [
     .target(
@@ -247,6 +247,8 @@ When the Mac is locked, the host application (or `locked-use`) requests a lease 
   ```
 - **Login Keychain remains locked**: Passwordless session unlock does not supply the user's login password, so the macOS Login Keychain stays locked during a Locked Use session; apps that read secrets from an unlocked Login Keychain cannot access those items until normal user unlock.
 - **Verified macOS versions**: Tested on Apple Silicon Mac running macOS 15.6; minimum deployment target is macOS 14.0.
+
+Administrator staging preserves relative framework symlinks only strictly inside `Client.app`; helpers and the app root cannot be symlinks. `LockedUseStagedTree.validate` checks ownership, permissions, ACLs, ancestors, and bounded link resolution before strict code-signature validation. Staging omits copied ACLs (not signature xattrs) and normalizes permissions without following links.
 
 ## Verification
 

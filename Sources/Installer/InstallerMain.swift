@@ -68,30 +68,9 @@ struct InstallerMain {
         return info
     }
 
-    /// Every source has already been copied into an administrator-owned staging
-    /// directory before execution. Refuse symlinks and writable ancestry so a
-    /// source replacement cannot race code validation and installation.
-    private static func trustedTree(_ url: URL) throws {
-        var ancestor = url.standardizedFileURL
-        while ancestor.path != "/" {
-            let fd = open(ancestor.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-            guard fd >= 0 else { throw InstallError.untrusted }
-            defer { Darwin.close(fd) }
-            var info = stat()
-            guard fstat(fd, &info) == 0, info.st_uid == 0,
-                  info.st_mode & 0o022 == 0, ocu_has_mutating_acl(fd) == 0 else { throw InstallError.untrusted }
-            ancestor.deleteLastPathComponent()
-        }
-        let urls = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil, options: [])
-        while let item = urls?.nextObject() as? URL {
-            var info = stat()
-            guard lstat(item.path, &info) == 0, info.st_uid == 0,
-                  [S_IFREG, S_IFDIR].contains(info.st_mode & S_IFMT), info.st_mode & 0o6022 == 0 else { throw InstallError.untrusted }
-            let fd = open(item.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-            guard fd >= 0 else { throw InstallError.untrusted }
-            let acl = ocu_has_mutating_acl(fd); Darwin.close(fd)
-            guard acl == 0 else { throw InstallError.untrusted }
-        }
+    private static func trustedTree(_ url: URL, allowContainedSymlinksUnder allowed: URL? = nil) throws {
+        do { try LockedUseStagedTree.validate(url, allowContainedSymlinksUnder: allowed) }
+        catch { throw InstallError.untrusted }
     }
 
     private static func makeDirectory(_ url: URL) throws {
@@ -193,7 +172,7 @@ struct InstallerMain {
     }
 
     private static func install(source: URL, uid: UInt32, team: String, validation: Bool, hostIdentifier: String?) throws {
-        try trustedTree(source)
+        try trustedTree(source, allowContainedSymlinksUnder: source.appendingPathComponent("Client.app", isDirectory: true))
         let broker = source.appendingPathComponent("LockedUseService")
         _ = try verify(broker, id: service, team: team)
         _ = try verify(source.appendingPathComponent("LockedUseInstaller"), id: "com.nia-teams.locked-use.installer", team: team)

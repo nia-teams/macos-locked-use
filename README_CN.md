@@ -141,7 +141,7 @@ locked-use exec [--require-locked] -- <command> [args...]
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/nia-teams/macos-locked-use.git", from: "0.1.0")
+    .package(url: "https://github.com/nia-teams/macos-locked-use.git", from: "0.1.1")
 ],
 targets: [
     .target(
@@ -247,6 +247,8 @@ func clickAndType(connection: LockedUseConnection) throws {
   ```
 - **登录钥匙串保持锁定**：无密码解锁未提供用户的登录密码，macOS 登录钥匙串（Login Keychain）在遮罩解锁期间仍处于锁定状态；依赖登录钥匙串读取凭据的应用在此期间无法读取受保护条目。
 - **已验证的系统版本**：已在 Apple Silicon Mac（macOS 15.6）上完成实测验证；构建与运行最低要求为 macOS 14.0。
+
+管理员暂存仅保留严格限制在 `Client.app` 内的相对框架符号链接；辅助组件及应用根目录不能是符号链接。`LockedUseStagedTree.validate` 在严格代码签名验证前检查所有权、权限、ACL、祖先目录及有界链接解析。暂存不复制 ACL（保留签名扩展属性），且权限规范化不跟随链接。
 
 ## 验证
 

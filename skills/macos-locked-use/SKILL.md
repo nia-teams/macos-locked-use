@@ -32,3 +32,5 @@ locked-use end
 ## Host Integration
 
 For CLI / Node.js integration or in-process Swift integration (`LockedUseKit` + bundling the 4 signed helper components under `Contents/Resources/LockedUse/`), see `README.md` and `Sources/LockedUseKit/LockedUseGUI.swift`.
+
+Staging preserves signed versioned-framework links strictly within `Client.app`. `LockedUseStagedTree.validate` rejects links in helpers or the app root, escaping/absolute/dangling/cyclic links, unsafe ownership/modes/ACLs, and untrusted ancestors; it does not replace strict signature verification. Permission normalization never dereferences staged symlinks.

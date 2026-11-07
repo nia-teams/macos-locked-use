@@ -69,6 +69,50 @@ class SourceTests(unittest.TestCase):
         self.assertIn("Copyright (c) 2026 Leo", license)
         self.assertIn("Copyright (c) 2026 Nia Teams", license)
 
+    def test_staged_tree_confines_bundle_symlinks(self):
+        tree = read("Sources/LockedUseKit/LockedUseStagedTree.swift")
+        for token in ["public enum LockedUseStagedTree", "case untrusted", "owner: 0",
+                      "trustedStopAncestor", "ancestors.reversed()", "lstat(path, &info)",
+                      "O_SYMLINK", "O_NOFOLLOW", "O_CLOEXEC", "fstat(fd, &opened)",
+                      "opened.st_dev == info.st_dev", "opened.st_ino == info.st_ino",
+                      "opened.st_uid == owner", "ocu_has_mutating_acl(fd) == 0",
+                      "0o6022", "Darwin.readlink", "Int(PATH_MAX)",
+                      '!text.hasPrefix("/")', "hops <= 16", "guard !stack.isEmpty",
+                      "isInside(path, allowed)", "O_DIRECTORY", "directories.popLast()",
+                      "FileManager.default.contentsOfDirectory(atPath: directory)", "directories.append(path)",
+                      'parts.dropLast().allSatisfy({ !$0.isEmpty })', 'parts[parts.count - 1] = "."']:
+            self.assertIn(token, tree)
+        self.assertNotIn("resolvingSymlinksInPath", tree)
+        self.assertNotIn(".enumerator(", tree)
+        link_case = tree[tree.index("                case S_IFLNK:"):tree.index("                default: throw Failure.untrusted")]
+        self.assertNotIn("directories.append", link_case)
+        installer = read("Sources/Installer/InstallerMain.swift")
+        self.assertIn("LockedUseStagedTree.validate(url, allowContainedSymlinksUnder: allowed)", installer)
+        self.assertIn('trustedTree(source, allowContainedSymlinksUnder: source.appendingPathComponent("Client.app", isDirectory: true))', installer)
+        self.assertIn("try trustedTree(daemon)", installer)
+        settings = read("Sources/LockedUseKit/LockedUseSettings.swift")
+        enable = settings[settings.index('let shell = "set -eu'):settings.index("try elevate(shell)")]
+        self.assertEqual(enable.count("/usr/bin/ditto --noacl "), 2)
+        for token in ['quote(stage + "/Client.app")', '"/bin/test ! -L "', '"/bin/test -d "',
+                      '" -path "', '" -prune -o -type l', '/usr/sbin/chown -hR -P',
+                      '/usr/bin/find -P', '/bin/chmod -R -P -N', '/bin/chmod -R -P go-w']:
+            self.assertIn(token, enable)
+        self.assertLess(enable.index('"/bin/test ! -e "'), enable.index('quote(LockedUseHost.currentBundle.bundleURL.path)'))
+        self.assertLess(enable.index('" -prune -o -type l'), enable.index('/usr/sbin/chown -hR -P'))
+        self.assertLess(enable.index('/bin/chmod -R -P -N'), enable.index('quote(LockedUseHost.currentBundle.bundleURL.path)'))
+        self.assertLess(enable.index('/bin/chmod -R -P go-w'), enable.index('/usr/bin/codesign'))
+        self.assertNotIn('quote(stage) + " -type l', enable)
+        self.assertNotIn('/bin/chmod -h -N', enable)
+        self.assertNotIn('--noxattr', enable)
+        self.assertNotIn('--norsrc', enable)
+        self.assertEqual(read("VERSION").strip(), "0.1.1")
+        tests = read("Tests/LockedUseKitTests/LockedUseStagedTreeTests.swift")
+        for token in ["testVersionedFramework", "testHelperAndAppRoots", "testAbsoluteEscaping",
+                      "testUnsafeModes", "testMutatingACLs", "testRegularFileRoot", "testTrailingSlashTargetsRequireDirectoriesAcrossChains"]:
+            self.assertIn(token, tests)
+        self.assertNotIn("lchmod(", tests)
+        self.assertIn('["-h", "0777",', tests)
+
     def test_console_unlock_observer_is_gated_and_identity_matched(self):
         broker = read("Sources/Broker/BrokerMain.swift")
         for token in ["coordinator.phase == .awaitingManualUnlock", "coordinator.isFullyReleased", "LockedUseSession.consoleSession(userID: owner.userID, auditSessionID: owner.auditSessionID)", "observeConsoleManualUnlock(session: session, now: now)"]:
