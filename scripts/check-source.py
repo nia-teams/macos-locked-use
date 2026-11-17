@@ -149,6 +149,115 @@ class SourceTests(unittest.TestCase):
         self.assertIn("ignoreShadowsSingleWindow = true", gui)
         self.assertIn("com.nia-teams.locked-use.holder", read("Sources/LockedUseKit/LockedUseSessionHolder.swift"))
 
+    def test_mouse_button_is_carried_through_targeted_dispatch(self):
+        parser = read("Sources/LockedUseKit/LockedUseGUICommand.swift")
+        for token in ['public enum LockedUseMouseButton: String, Sendable', 'case left, right',
+                      'public let button: LockedUseMouseButton',
+                      'LockedUseMouseButton(rawValue: values["--button"] ?? "left")',
+                      'case .click: allowed.formUnion(["--x", "--y", "--button"])']:
+            self.assertIn(token, parser)
+        gui = read("Sources/LockedUseKit/LockedUseGUI.swift")
+        self.assertEqual(gui.count("button: LockedUseMouseButton = .left"), 2)
+        self.assertEqual(gui.count("clickCount: clickCount, button: button)"), 2)
+        self.assertIn("button: request.button)", read("Sources/LockedUseCLI/LockedUseMain.swift"))
+        click = read("Sources/LockedUseKit/LockedUseClick.swift")
+        for token in ['self == .right ? .right : .left',
+                      'return button == .right ? .rightMouseDown : .leftMouseDown',
+                      'return button == .right ? .rightMouseUp : .leftMouseUp',
+                      'return .mouseMoved', 'mouseType: step.kind.cgEventType(button: button)',
+                      'mouseButton: step.kind == .moved ? .left : button.cgMouseButton', 'button: button,',
+                      'static let buttonNumber: UInt32 = 3',
+                      'field: EventField.buttonNumber, value: event.type == .mouseMoved ? 0 : Int64(button.cgMouseButton.rawValue)',
+                      'skyClickEventRecipe(clickCount: clickCount, button: button,',
+                      'includePrimer: button == .left && !isPopupTarget)',
+                      'if button == .left && includePrimer',
+                      'if button == .left', 'if button != .right',
+                      'let effectiveTarget = resolveSkyClickTarget(target, onScreenWindowInfo: onScreen)',
+                      'try spi.postToPid(event, pid: effectiveTarget.pid)']:
+            self.assertIn(token, click)
+        self.assertEqual(click.count('try spi.postToPid(event, pid: effectiveTarget.pid)'), 1)
+        self.assertNotIn('event.postToPid(', click)
+        # Single-window capture already includes child NSMenus on macOS 15.6.1.
+        self.assertEqual(gui.count('SCScreenshotManager.captureImage('), 1)
+        self.assertEqual(gui.count('SCContentFilter(desktopIndependentWindow:'), 1)
+        for token in ['sameAppPopupsAbove', 'lockedUsePopupDrawRect', 'CGContext(', 'overlay']:
+            self.assertNotIn(token, gui)
+        self.assertNotIn('lockedUsePopupDrawRect', click)
+        self.assertIn('func sameAppPopupsAbove(', click)
+        self.assertIn('let isPopupTarget = effectiveTarget.windowID != target.windowID', click)
+        popup_focus = click[click.index('} else if isPopupTarget {'):click.index('} else {', click.index('} else if isPopupTarget {'))]
+        self.assertIn('spi.syntheticTargetFocusContext(', popup_focus)
+        self.assertIn('targetPID: target.pid', popup_focus)
+        self.assertIn('targetWindowID: target.windowID', popup_focus)
+        self.assertNotIn('beginSyntheticTargetFocus', popup_focus)
+        self.assertNotIn('makeSyntheticTargetWindowKey', click)
+        spi = read("Sources/LockedUseKit/LockedUseInputSPI.swift")
+        resolve_focus = spi[spi.index('    func syntheticTargetFocusContext('):spi.index('    func beginSyntheticTargetFocus(')]
+        self.assertIn('getProcessForPIDFunction(targetPID, bytes.baseAddress)', resolve_focus)
+        self.assertNotIn('postActivationCommand(', resolve_focus)
+        self.assertNotIn('postEventRecordFunction(', resolve_focus)
+        end_focus = spi[spi.index('    func endSyntheticTargetFocus('):spi.index('    private func unavailableError(')]
+        self.assertEqual(end_focus.count('postActivationCommand('), 1)
+        self.assertIn('postActivationCommand(context.deactivateTarget)', end_focus)
+        self.assertNotIn('beginSyntheticTargetFocus', end_focus)
+        # The production boundary covers AX selection and every mouse post.
+        self.assertIn('try dispatchWithFocusCleanup(focusContext: focusContext, button: button,', click)
+        self.assertIn('endFocus: spi.endSyntheticTargetFocus) {', click)
+        lifecycle = click[click.index('    static func dispatchWithFocusCleanup('):click.index('    // Native NSMenu')]
+        failure = lifecycle[lifecycle.index('} catch {'):lifecycle.index('        if button != .right')]
+        self.assertIn('if let focusContext {', failure)
+        self.assertIn('try? endFocus(focusContext)', failure)
+        self.assertLess(failure.index('try? endFocus(focusContext)'), failure.index('throw error'))
+        self.assertIn('if button != .right, let focusContext {', lifecycle)
+        self.assertIn('try endFocus(focusContext)', lifecycle)
+        settle = click[click.index('let rendererSettle ='):click.index('    static func dispatchWithFocusCleanup(')]
+        self.assertIn('0.100 * LockedUseInputTiming.skyClickDelayScale', settle)
+        self.assertIn('Thread.sleep(', settle)
+        self.assertIn('phase: 2, delayAfter: 0.015)', click)
+        menu_press = click[click.index('    static func pressPopupMenuItem('):click.index('    static func pressAXPopupMenuItem(')]
+        self.assertIn('guard isPopupTarget && button == .left && clickCount == 1 else { return false }', menu_press)
+        self.assertEqual(menu_press.count('try LockedUseActionScope.validate()'), 2)
+        self.assertLess(menu_press.index('try LockedUseActionScope.validate()'), menu_press.index('let pressed = try press('))
+        self.assertLess(menu_press.index('let pressed = try press('), menu_press.rindex('try LockedUseActionScope.validate()'))
+        ax_press = click[click.index('    static func pressAXPopupMenuItem('):click.index('    private static func validate(')]
+        for token in ['AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid)',
+                      'Float(screenPoint.x), Float(screenPoint.y)',
+                      'AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)',
+                      'role as? String == kAXMenuItemRole as String',
+                      'AXUIElementPerformAction(element, kAXPressAction as CFString) == .success']:
+            self.assertIn(token, ax_press)
+        self.assertLess(ax_press.index('try LockedUseActionScope.validate()'), ax_press.index('AXUIElementPerformAction('))
+        dispatch = click[click.index('        try dispatchWithFocusCleanup('):click.index('    static func dispatchWithFocusCleanup(')]
+        self.assertLess(dispatch.index('try pressPopupMenuItem('), dispatch.index('if !pressedPopupMenuItem {'))
+        self.assertLess(dispatch.index('if !pressedPopupMenuItem {'), dispatch.index('for step in recipe {'))
+        self.assertIn('if focusContext != nil || pressedPopupMenuItem {', dispatch)
+        tests = read("Tests/LockedUseKitTests/LockedUseIntegrationChangesTests.swift")
+        for name in ['testClickButtonParserDefaultsValuesAndRejections',
+                     'testClickButtonCocoaEventEncoding',
+                     'testClickButtonChromiumStampEncodingWithoutPosting',
+                     'testSameAppPopupResolution',
+                     'testPopupClickRecipePreservesTrackingAndExistingTiming',
+                     'testPopupFocusCleanupResolvesWithoutPostingActivation',
+                     'testPopupMenuPressEligibilityAndInjectedOutcomes',
+                     'testPopupMenuPressCancellationBeforeAndAfterProbe',
+                     'testDispatchErrorsAttemptFocusCleanupForLeftRightAndPopupClicks',
+                     'testSuccessfulRightClickRetainsFocusAndNoContextNeedsNoCleanup']:
+            self.assertIn(name, tests)
+        for name in ['README.md', 'README_CN.md', 'skills/macos-locked-use/SKILL.md',
+                     'Sources/LockedUseKit/LockedUseCommand.swift']:
+            self.assertIn('--button left|right', read(name))
+
+    def test_public_docs_keep_portable_metadata_and_usage_contracts(self):
+        skill = read("skills/macos-locked-use/SKILL.md")
+        frontmatter = skill.split("---", 2)[1]
+        self.assertEqual([line.split(":", 1)[0] for line in frontmatter.strip().splitlines()],
+                         ["name", "description"])
+        for name in ["README.md", "README_CN.md", "skills/macos-locked-use/SKILL.md"]:
+            text = read(name)
+            self.assertNotIn("15.6.1", text)
+            self.assertNotIn("title:", text)
+        self.assertNotRegex(read("README_CN.md"), r"\bCLI\b|mouse-up|自动")
+
     def test_exclusive_hid_patch_and_teardown_are_retained(self):
         # Exact PR #143 source after extraction; protects the complete fallback,
         # callback error handling and per-device unschedule/close, not just tokens.

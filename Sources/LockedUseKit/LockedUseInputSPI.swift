@@ -180,7 +180,9 @@ final class LockedUseInputSPI: @unchecked Sendable {
         setWindowLocationFunction(opaquePointer(for: event), point.x, point.y)
     }
 
-    func beginSyntheticTargetFocus(
+    /// Resolve the cleanup record without posting focus events. An open popup
+    /// may inherit synthetic focus from a right-click in another CLI process.
+    func syntheticTargetFocusContext(
         targetPID: pid_t,
         targetWindowID: CGWindowID
     ) throws -> SkyLightSyntheticFocusContext {
@@ -198,18 +200,24 @@ final class LockedUseInputSPI: @unchecked Sendable {
             )
         }
 
-        let plan = skyLightSyntheticTargetFocusPlan(
-            targetPSN: targetPSN,
-            targetWindowID: targetWindowID
-        )
-        try postActivationCommand(plan.activateTarget)
+        return SkyLightSyntheticFocusContext(deactivateTarget:
+            skyLightSyntheticTargetFocusPlan(targetPSN: targetPSN,
+                targetWindowID: targetWindowID).deactivateTarget)
+    }
+
+    func beginSyntheticTargetFocus(
+        targetPID: pid_t,
+        targetWindowID: CGWindowID
+    ) throws -> SkyLightSyntheticFocusContext {
+        let context = try syntheticTargetFocusContext(targetPID: targetPID, targetWindowID: targetWindowID)
+        let command = context.deactivateTarget
+        try postActivationCommand(SkyLightActivationCommand(
+            psn: command.psn, windowID: command.windowID, focused: true
+        ))
         if LockedUseInputTiming.focusRecordSettle > 0 {
             Thread.sleep(forTimeInterval: LockedUseInputTiming.focusRecordSettle)
         }
-
-        return SkyLightSyntheticFocusContext(
-            deactivateTarget: plan.deactivateTarget
-        )
+        return context
     }
 
     /// Make the target window key inside the target app while it is in the

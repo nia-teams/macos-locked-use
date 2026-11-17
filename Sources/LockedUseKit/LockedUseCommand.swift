@@ -13,13 +13,14 @@ public enum LockedUseCommand: Equatable {
     Usage: locked-use status [--json]
            locked-use enable | disable | recover | certify | end | lock
            locked-use exec [--require-locked] -- <command> [args...]
-           locked-use click (--app <name-or-bundle-id> | --pid <pid> | --window-id <id>) --x <coord> --y <coord> [--pixel] [--double] [--screen | --window-local] [--require-locked]
+           locked-use click (--app <name-or-bundle-id> | --pid <pid> | --window-id <id>) --x <coord> --y <coord> [--button left|right] [--pixel] [--double] [--screen | --window-local] [--require-locked]
            locked-use type <target> --text <text> [--require-locked]
            locked-use key <target> --key <cmd+v|Return|...> [--require-locked]
            locked-use capture <target> --out <file.png> [--require-locked]
     Target options may be combined to constrain ownership. Click coordinates default
     to logical points from the window's top-left; pass --pixel to use screenshot
-    pixel coordinates directly, or --screen for global screen points. Exit 75: yield
+    pixel coordinates directly, or --screen for global screen points. The mouse
+    button defaults to left; use --button right for context menus. Exit 75: yield
     to human; 76: lease expired/relocked; 77: unavailable/precondition; 64: usage.
     """
 

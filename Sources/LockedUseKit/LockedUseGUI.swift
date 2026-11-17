@@ -45,15 +45,15 @@ public enum LockedUseGUI {
         throw LockedUseError.stateUnavailable("No matching normal app window; check the app, PID, and window ID")
     }
 
-    public static func click(windowID: CGWindowID, pid: pid_t, windowBounds: CGRect, screenPoint: CGPoint, clickCount: Int = 1) throws {
+    public static func click(windowID: CGWindowID, pid: pid_t, windowBounds: CGRect, screenPoint: CGPoint, clickCount: Int = 1, button: LockedUseMouseButton = .left) throws {
         try LockedUseClickDispatcher.click(target: .init(screenPoint: screenPoint,
             windowPoint: CGPoint(x: screenPoint.x - windowBounds.minX, y: screenPoint.y - windowBounds.minY),
-            windowBounds: windowBounds, windowID: windowID, pid: pid), clickCount: clickCount)
+            windowBounds: windowBounds, windowID: windowID, pid: pid), clickCount: clickCount, button: button)
     }
 
-    public static func click(target: LockedUseWindowTarget, x: Double, y: Double, screen: Bool = false, clickCount: Int = 1) throws {
+    public static func click(target: LockedUseWindowTarget, x: Double, y: Double, screen: Bool = false, clickCount: Int = 1, button: LockedUseMouseButton = .left) throws {
         try click(windowID: target.windowID, pid: target.pid, windowBounds: target.bounds,
-            screenPoint: CGPoint(x: x + (screen ? 0 : target.bounds.minX), y: y + (screen ? 0 : target.bounds.minY)), clickCount: clickCount)
+            screenPoint: CGPoint(x: x + (screen ? 0 : target.bounds.minX), y: y + (screen ? 0 : target.bounds.minY)), clickCount: clickCount, button: button)
     }
 
     public static func backingScaleFactor(for windowBounds: CGRect) -> Double {

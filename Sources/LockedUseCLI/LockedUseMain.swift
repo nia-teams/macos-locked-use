@@ -71,7 +71,7 @@ struct LockedUseMain {
         switch request.action {
         case .click:
             let scale = request.pixel ? LockedUseGUI.backingScaleFactor(for: target.bounds) : 1
-            try LockedUseGUI.click(target: target, x: request.x! / scale, y: request.y! / scale, screen: request.screen, clickCount: request.doubleClick ? 2 : 1)
+            try LockedUseGUI.click(target: target, x: request.x! / scale, y: request.y! / scale, screen: request.screen, clickCount: request.doubleClick ? 2 : 1, button: request.button)
         case .type:
             try LockedUseGUI.typeText(request.text!, windowID: target.windowID, pid: target.pid)
         case .key:

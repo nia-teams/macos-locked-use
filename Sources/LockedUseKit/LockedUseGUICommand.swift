@@ -1,5 +1,9 @@
 import Foundation
 
+public enum LockedUseMouseButton: String, Sendable {
+    case left, right
+}
+
 public struct LockedUseGUICommand: Equatable, Sendable {
     public enum Action: String, Sendable { case click, type, key, capture }
     public let action: Action
@@ -10,6 +14,7 @@ public struct LockedUseGUICommand: Equatable, Sendable {
     public let y: Double?
     public let pixel: Bool
     public let screen: Bool
+    public let button: LockedUseMouseButton
     public let doubleClick: Bool
     public let text: String?
     public let key: String?
@@ -21,7 +26,7 @@ public struct LockedUseGUICommand: Equatable, Sendable {
         var values: [String: String] = [:]
         var flags: Set<String> = []
         var index = 1
-        let valueOptions: Set<String> = ["--app", "--pid", "--window-id", "--x", "--y", "--text", "--key", "--out"]
+        let valueOptions: Set<String> = ["--app", "--pid", "--window-id", "--x", "--y", "--text", "--key", "--out", "--button"]
         let flagOptions: Set<String> = ["--pixel", "--screen", "--window-local", "--double", "--require-locked"]
         while index < arguments.count {
             let option = arguments[index]
@@ -32,7 +37,7 @@ public struct LockedUseGUICommand: Equatable, Sendable {
         }
         var allowed: Set<String> = ["--app", "--pid", "--window-id"]
         switch action {
-        case .click: allowed.formUnion(["--x", "--y"])
+        case .click: allowed.formUnion(["--x", "--y", "--button"])
         case .type: allowed.insert("--text")
         case .key: allowed.insert("--key")
         case .capture: allowed.insert("--out")
@@ -43,6 +48,9 @@ public struct LockedUseGUICommand: Equatable, Sendable {
               !(flags.contains("--screen") && flags.contains("--pixel")),
               values["--app"] != nil || values["--pid"] != nil || values["--window-id"] != nil else {
             throw LockedUseError.usage("Specify a target (--app, --pid, or --window-id) and options appropriate for \(first)")
+        }
+        guard let button = LockedUseMouseButton(rawValue: values["--button"] ?? "left") else {
+            throw LockedUseError.usage("--button must be left or right")
         }
         let pid = values["--pid"].flatMap(Int32.init)
         let windowID = values["--window-id"].flatMap(UInt32.init)
@@ -56,7 +64,7 @@ public struct LockedUseGUICommand: Equatable, Sendable {
               action != .capture || values["--out"]?.isEmpty == false else { throw LockedUseError.usage("Missing or invalid \(first) arguments") }
         if let key = values["--key"] { _ = try LockedUseKeyPressParser.parse(key) }
         return .init(action: action, app: values["--app"], pid: pid, windowID: windowID,
-            x: x, y: y, pixel: flags.contains("--pixel"), screen: flags.contains("--screen"), doubleClick: flags.contains("--double"),
+            x: x, y: y, pixel: flags.contains("--pixel"), screen: flags.contains("--screen"), button: button, doubleClick: flags.contains("--double"),
             text: values["--text"], key: values["--key"], output: values["--out"], requireLocked: flags.contains("--require-locked"))
     }
 }

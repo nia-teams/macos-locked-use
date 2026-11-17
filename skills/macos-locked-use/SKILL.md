@@ -29,8 +29,10 @@ locked-use end
 
 `capture` prints JSON containing `windowID` and `pid`; pass `windowID` to subsequent `click / type / key` calls. `click` accepts screenshot pixel coordinates with `--pixel`, window-local logical points by default (`--window-local`), or global screen points with `--screen`.
 
+`click --button left|right` defaults to `left`; use `--button right` to open a context menu. `capture` includes open child menus within the base window’s bounds. A subsequent single left `click` with the original window selector selects a native menu item or clicks a same-app popup window, then releases target focus.
+
 ## Host Integration
 
 For CLI / Node.js integration or in-process Swift integration (`LockedUseKit` + bundling the 4 signed helper components under `Contents/Resources/LockedUse/`), see `README.md` and `Sources/LockedUseKit/LockedUseGUI.swift`.
 
-Staging preserves signed versioned-framework links strictly within `Client.app`. `LockedUseStagedTree.validate` rejects links in helpers or the app root, escaping/absolute/dangling/cyclic links, unsafe ownership/modes/ACLs, and untrusted ancestors; it does not replace strict signature verification. Permission normalization never dereferences staged symlinks.
+Staging preserves signed versioned-framework links within `Client.app`. `LockedUseStagedTree.validate` rejects links in helpers or the app root, escaping/absolute/dangling/cyclic links, unsafe ownership/modes/ACLs, and untrusted ancestors; it does not replace code-signature verification. Permission normalization never dereferences staged symlinks.

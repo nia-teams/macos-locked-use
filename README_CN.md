@@ -2,6 +2,18 @@
 
 [English](./README.md) | 简体中文
 
+`macos-locked-use` 让 AI Agent 在锁屏会话的隐私遮罩下截图并操作 macOS 宿主窗口。
+
+```sh
+./scripts/build-locked-use.sh --identity "Apple Development: Your Name (TEAMID)"
+./dist/release-native/bin/locked-use enable
+./dist/release-native/bin/locked-use capture --app Finder --out /tmp/finder.png
+```
+
+AI Agent Skill：[`skills/macos-locked-use/SKILL.md`](./skills/macos-locked-use/SKILL.md)
+
+## 背景
+
 Computer Use 通过窗口截图、无障碍树（Accessibility）与键鼠事件让 AI Agent 操作桌面应用。在无人值守场景下，核心目标是让 Agent 继续操作宿主桌面，而物理屏幕前的其他人看不到桌面内容、也不能操作电脑。
 
 但在 macOS 上，进入锁屏后系统会停止输出桌面窗口画面，并将键鼠与无障碍输入限制在锁屏界面，导致 Agent 无法继续操作；而现有的替代方案也无法同时满足这一目标：
@@ -13,14 +25,6 @@ Computer Use 通过窗口截图、无障碍树（Accessibility）与键鼠事件
 - **定向窗口操作**：临时解锁图形会话，通过 `ScreenCaptureKit` 独立窗口采集与按窗口 ID / PID 定向事件投递操作目标应用。
 - **全屏遮罩与本地输入重锁**：所有显示器覆盖全屏模糊壁纸遮罩（显示当前用户头像、`<宿主应用名> is Using Your Mac` 与 `Press any key or click to unlock`）；任务结束时恢复系统锁屏，检测到本地鼠标移动或按键时重锁并要求用户先手动解锁一次后才能再次启用（`awaitingManualUnlock`）。
 - **单次授权许可**：通过 `SecurityAgent` 授权插件与 `root` 守护进程配合，在双进程遮罩就绪后签发 5 秒有效期的单次解锁许可，任务结束后恢复锁屏并由用户以密码或 Touch ID 解锁。
-
-```sh
-./scripts/build-locked-use.sh --identity "Apple Development: Your Name (TEAMID)"
-./dist/release-native/bin/locked-use enable
-./dist/release-native/bin/locked-use capture --app Finder --out /tmp/finder.png
-```
-
-AI Agent Skill：[`skills/macos-locked-use/SKILL.md`](./skills/macos-locked-use/SKILL.md)
 
 ## 接入方式
 
@@ -108,7 +112,7 @@ async function runTask() {
 locked-use status [--json]
 locked-use enable | disable | recover | end | lock
 locked-use capture (--app <name-or-bundle-id> | --pid <pid> | --window-id <id>) --out <file.png> [--require-locked]
-locked-use click <target> --x <coord> --y <coord> [--pixel] [--double] [--window-local | --screen] [--require-locked]
+locked-use click <target> --x <coord> --y <coord> [--button left|right] [--pixel] [--double] [--window-local | --screen] [--require-locked]
 locked-use type <target> --text <text> [--require-locked]
 locked-use key <target> --key <cmd+v|Return|...> [--require-locked]
 locked-use exec [--require-locked] -- <command> [args...]
@@ -116,6 +120,7 @@ locked-use exec [--require-locked] -- <command> [args...]
 
 - **窗口选择器（`<target>`）**：支持 `--app`、`--pid`、`--window-id` 单独或组合约束；未指定 `--window-id` 时选取最靠前的正常 `layer == 0` 应用窗口。
 - **坐标与 Retina 换算**：`capture` 输出 JSON（含 `windowID`、`pid`、逻辑点 `bounds`、物理像素 `pixelWidth` / `pixelHeight` 与 `path`），只采集目标窗口自身像素，不包含遮罩画面。`click` 传入 `--pixel` 时按窗口截图像素坐标点击，默认采用相对窗口左上角的逻辑点（`--window-local`），传入 `--screen` 时采用全局屏幕逻辑点。
+- **鼠标按键**：`click` 的 `--button left|right` 默认 `left`。`--button right` 打开右键菜单并保留目标焦点。`capture` 包含原窗口范围内打开的子菜单。后续单次左键 `click` 传入原窗口选择器时，选中命中的原生菜单项或点击同应用弹窗，并在完成后释放目标焦点。
 - **管理与执行子命令**：
   - `enable` / `disable` / `recover`：安装或更新组件、卸载组件并恢复原认证规则、修复中断的安装。更新宿主应用后若 `status` 提示插件版本不一致，再次运行 `enable` 同步系统组件。
   - `exec [--require-locked] -- <cmd> [args...]`：在遮罩会话内运行前台子进程（如无障碍树查询脚本）。加 `--require-locked` 时，若当前未锁屏且无活跃租约则返回 `77`。
@@ -205,6 +210,8 @@ func clickAndType(connection: LockedUseConnection) throws {
 }
 ```
 
+两个 `LockedUseGUI.click` 重载均接受 `button: LockedUseMouseButton = .left`；传入 `button: .right` 请求右键菜单，坐标与点击次数语义不变。
+
 异步单窗口截图 `LockedUseGUI.captureWindow(windowID:outputPath:)` 可配合 `LockedUseConnection.beginAction` / `finishAction` 与 `LockedUseActionScope.withAsyncValidator` 调用；同一连接上的 GUI 操作保持串行。
 
 ## 系统权限
@@ -240,7 +247,7 @@ func clickAndType(connection: LockedUseConnection) throws {
 
 ## 安全与风险
 
-- **本机进程的调用边界**：Broker 通过内核 `LOCAL_PEERTOKEN` 校验连接进程的签名标识、Team ID、Hardened Runtime，并拒绝带 `get-task-allow` 或注入环境变量的进程。若客户端在进程内集成 `LockedUseKit` 且不安装 `locked-use` CLI，本机其他程序无法借用其签名解锁屏幕；若在机器上部署 `locked-use` CLI，当前登录用户下的其他本地进程可调用 `locked-use` 借用其签名在锁屏期间截图或操作窗口。
+- **本机进程的调用边界**：Broker 通过内核 `LOCAL_PEERTOKEN` 校验连接进程的签名标识、Team ID、Hardened Runtime，并拒绝带 `get-task-allow` 或注入环境变量的进程。若客户端在进程内集成 `LockedUseKit` 且不安装 `locked-use` 命令行工具，本机其他程序无法借用其签名解锁屏幕；若在机器上部署 `locked-use` 命令行工具，当前登录用户下的其他本地进程可调用 `locked-use` 借用其签名在锁屏期间截图或操作窗口。
 - **锁屏异常与远程恢复**：修改 `system.login.screensaver` 涉及系统锁屏认证链路，安装前建议在「系统设置 → 通用 → 共享」中开启「远程登录（SSH）」。若插件异常或锁屏界面长时间无法进入桌面，可从另一台设备通过 SSH 登录执行以下命令恢复系统原生锁屏认证：
   ```sh
   sudo "/Library/Application Support/LockedUse/LockedUseInstaller" recover
@@ -248,7 +255,7 @@ func clickAndType(connection: LockedUseConnection) throws {
 - **登录钥匙串保持锁定**：无密码解锁未提供用户的登录密码，macOS 登录钥匙串（Login Keychain）在遮罩解锁期间仍处于锁定状态；依赖登录钥匙串读取凭据的应用在此期间无法读取受保护条目。
 - **已验证的系统版本**：已在 Apple Silicon Mac（macOS 15.6）上完成实测验证；构建与运行最低要求为 macOS 14.0。
 
-管理员暂存仅保留严格限制在 `Client.app` 内的相对框架符号链接；辅助组件及应用根目录不能是符号链接。`LockedUseStagedTree.validate` 在严格代码签名验证前检查所有权、权限、ACL、祖先目录及有界链接解析。暂存不复制 ACL（保留签名扩展属性），且权限规范化不跟随链接。
+管理员暂存仅保留位于 `Client.app` 内的相对框架符号链接；辅助组件及应用根目录不能是符号链接。`LockedUseStagedTree.validate` 在代码签名验证前检查所有权、权限、ACL、祖先目录及有界链接解析。暂存不复制 ACL（保留签名扩展属性），且权限规范化不跟随链接。
 
 ## 验证
 

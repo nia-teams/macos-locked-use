@@ -1,5 +1,6 @@
 // Target-only input; adapted from the MIT-licensed upstream recipes.
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Foundation
 
@@ -11,19 +12,23 @@ struct SkyClickTarget {
     let pid: pid_t
 }
 
+extension LockedUseMouseButton {
+    var cgMouseButton: CGMouseButton { self == .right ? .right : .left }
+}
+
 enum SkyClickEventKind: Equatable, Sendable {
     case moved
     case down
     case up
 
-    var cgEventType: CGEventType {
+    func cgEventType(button: LockedUseMouseButton) -> CGEventType {
         switch self {
         case .moved:
             return .mouseMoved
         case .down:
-            return .leftMouseDown
+            return button == .right ? .rightMouseDown : .leftMouseDown
         case .up:
-            return .leftMouseUp
+            return button == .right ? .rightMouseUp : .leftMouseUp
         }
     }
 }
@@ -41,7 +46,11 @@ struct SkyClickEventStep: Equatable, Sendable {
     let delayAfter: TimeInterval
 }
 
-func skyClickEventRecipe(clickCount: Int) throws -> [SkyClickEventStep] {
+func skyClickEventRecipe(
+    clickCount: Int,
+    button: LockedUseMouseButton = .left,
+    includePrimer: Bool = true
+) throws -> [SkyClickEventStep] {
     guard (1...2).contains(clickCount) else {
         throw LockedUseError.message(
             "click_method 'sky_click' supports click_count 1 or 2"
@@ -50,9 +59,11 @@ func skyClickEventRecipe(clickCount: Int) throws -> [SkyClickEventStep] {
 
     var steps = [
         SkyClickEventStep(kind: .moved, pointKind: .target, clickState: 0, phase: 2, delayAfter: 0.015),
-        SkyClickEventStep(kind: .down, pointKind: .primer, clickState: 1, phase: 1, delayAfter: 0.001),
-        SkyClickEventStep(kind: .up, pointKind: .primer, clickState: 1, phase: 2, delayAfter: 0.100),
     ]
+    if button == .left && includePrimer {
+        steps.append(SkyClickEventStep(kind: .down, pointKind: .primer, clickState: 1, phase: 1, delayAfter: 0.001))
+        steps.append(SkyClickEventStep(kind: .up, pointKind: .primer, clickState: 1, phase: 2, delayAfter: 0.100))
+    }
 
     for pairIndex in 1...clickCount {
         steps.append(
@@ -89,6 +100,48 @@ func skyClickWindowMatchesTarget(
     skyKeyWindowMatchesTarget(windowInfo: windowInfo, windowID: windowID, pid: pid)
 }
 
+// WindowServer supplies front-to-back order; only same-app popups in front
+// of the requested base window can receive its clicks.
+func sameAppPopupsAbove(
+    windowInfo: [[String: Any]],
+    pid: pid_t,
+    baseWindowID: CGWindowID,
+    shieldLevel: Int = Int(CGShieldingWindowLevel())
+) -> [LockedUseWindowTarget] {
+    let baseIndex = windowInfo.firstIndex {
+        ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == baseWindowID
+    }
+    guard let baseIndex, baseIndex > 0 else { return [] }
+    var popups: [LockedUseWindowTarget] = []
+    for item in windowInfo[0 ..< baseIndex] {
+        guard let id = (item[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+              id != baseWindowID,
+              let owner = (item[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+              owner == pid else { continue }
+        let alpha = (item[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+        guard alpha > 0,
+              let layer = (item[kCGWindowLayer as String] as? NSNumber)?.intValue,
+              layer >= 0, layer < shieldLevel else { continue }
+        let title = (item[kCGWindowName as String] as? String) ?? ""
+        guard layer > 0 || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let rawBounds = item[kCGWindowBounds as String] as? [String: Any],
+              let bounds = CGRect(dictionaryRepresentation: rawBounds as CFDictionary),
+              bounds.width >= 2, bounds.height >= 2 else { continue }
+        popups.append(LockedUseWindowTarget(windowID: id, pid: pid, bounds: bounds))
+    }
+    return popups
+}
+
+func resolveSkyClickTarget(_ target: SkyClickTarget, onScreenWindowInfo: [[String: Any]]) -> SkyClickTarget {
+    if let popup = sameAppPopupsAbove(windowInfo: onScreenWindowInfo, pid: target.pid, baseWindowID: target.windowID)
+        .first(where: { $0.bounds.contains(target.screenPoint) }) {
+        return SkyClickTarget(screenPoint: target.screenPoint,
+            windowPoint: CGPoint(x: target.screenPoint.x - popup.bounds.minX, y: target.screenPoint.y - popup.bounds.minY),
+            windowBounds: popup.bounds, windowID: popup.windowID, pid: target.pid)
+    }
+    return target
+}
+
 enum LockedUseClickDispatcher {
     private static let primerScreenPoint = CGPoint(x: -1, y: -1)
     private static let primerWindowPoint = CGPoint(x: -1, y: -1)
@@ -110,6 +163,7 @@ enum LockedUseClickDispatcher {
     static func click(
         target: SkyClickTarget,
         clickCount: Int,
+        button: LockedUseMouseButton = .left,
         spi: LockedUseInputSPI = .shared
     ) throws {
         try requireUsableComputerUseSession()
@@ -125,7 +179,15 @@ enum LockedUseClickDispatcher {
         }
 
         try validate(target: target)
-        let recipe = try skyClickEventRecipe(clickCount: clickCount)
+        let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let effectiveTarget = resolveSkyClickTarget(target, onScreenWindowInfo: onScreen)
+        guard CGRect(origin: .zero, size: effectiveTarget.windowBounds.size).contains(effectiveTarget.windowPoint) else {
+            throw LockedUseError.message("sky_click target is outside the snapshot window bounds")
+        }
+        let isPopupTarget = effectiveTarget.windowID != target.windowID
+        // An off-menu primer dismisses a tracking NSMenu before the real click.
+        let recipe = try skyClickEventRecipe(clickCount: clickCount, button: button,
+            includePrimer: button == .left && !isPopupTarget)
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw LockedUseError.message("Failed to create SkyLight HID event source.")
         }
@@ -137,71 +199,125 @@ enum LockedUseClickDispatcher {
 
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let focusContext: SkyLightSyntheticFocusContext?
-        if frontmostPID == target.pid {
+        if frontmostPID == effectiveTarget.pid {
             focusContext = nil
-        } else {
-            focusContext = try spi.beginSyntheticTargetFocus(
+        } else if isPopupTarget {
+            // The menu inherits synthetic focus from the earlier right-click,
+            // possibly in another CLI process. Resolve cleanup without sending
+            // an activation record that could interrupt its tracking loop.
+            focusContext = try spi.syntheticTargetFocusContext(
                 targetPID: target.pid,
                 targetWindowID: target.windowID
             )
+        } else {
+            focusContext = try spi.beginSyntheticTargetFocus(
+                targetPID: effectiveTarget.pid,
+                targetWindowID: effectiveTarget.windowID
+            )
         }
 
-        do {
-            for step in recipe {
-                try requireUsableComputerUseSession()
-                let screenPoint = step.pointKind == .target ? target.screenPoint : primerScreenPoint
-                let windowPoint = step.pointKind == .target ? target.windowPoint : primerWindowPoint
-                guard let event = CGEvent(
-                    mouseEventSource: source,
-                    mouseType: step.kind.cgEventType,
-                    mouseCursorPosition: screenPoint,
-                    mouseButton: .left
-                ) else {
-                    throw LockedUseError.message(
-                        "Failed to create sky_click mouse event \(step.kind.cgEventType.rawValue)."
+        try dispatchWithFocusCleanup(focusContext: focusContext, button: button,
+            endFocus: spi.endSyntheticTargetFocus) {
+            let pressedPopupMenuItem = try pressPopupMenuItem(target: effectiveTarget,
+                isPopupTarget: isPopupTarget, button: button, clickCount: clickCount)
+            if !pressedPopupMenuItem {
+                for step in recipe {
+                    try requireUsableComputerUseSession()
+                    let screenPoint = step.pointKind == .target ? effectiveTarget.screenPoint : primerScreenPoint
+                    let windowPoint = step.pointKind == .target ? effectiveTarget.windowPoint : primerWindowPoint
+                    guard let event = CGEvent(
+                        mouseEventSource: source,
+                        mouseType: step.kind.cgEventType(button: button),
+                        mouseCursorPosition: screenPoint,
+                        mouseButton: step.kind == .moved ? .left : button.cgMouseButton
+                    ) else {
+                        throw LockedUseError.message(
+                            "Failed to create sky_click mouse event \(step.kind.cgEventType(button: button).rawValue)."
+                        )
+                    }
+
+                    try stamp(
+                        event,
+                        target: effectiveTarget,
+                        windowPoint: windowPoint,
+                        clickState: step.clickState,
+                        phase: step.phase,
+                        button: button,
+                        clickGroupID: clickGroupID,
+                        spi: spi
                     )
-                }
 
-                try stamp(
-                    event,
-                    target: target,
-                    windowPoint: windowPoint,
-                    clickState: step.clickState,
-                    phase: step.phase,
-                    clickGroupID: clickGroupID,
-                    spi: spi
-                )
+                    try spi.postToPid(event, pid: effectiveTarget.pid)
+                    try LockedUseActionScope.validate()
 
-                // The current Cua Driver Chromium recipe deliberately posts through
-                // both channels: SkyLight reaches Chromium/Catalyst while the public
-                // path preserves AppKit compatibility. This is one dispatch policy,
-                // not a retry after an observed failure.
-                try spi.postToPid(event, pid: target.pid)
-                try LockedUseActionScope.validate()
-                event.postToPid(target.pid)
-
-                let delay = step.delayAfter * LockedUseInputTiming.skyClickDelayScale
-                if delay > 0 {
-                    Thread.sleep(forTimeInterval: delay)
+                    let delay = step.delayAfter * LockedUseInputTiming.skyClickDelayScale
+                    if delay > 0 {
+                        Thread.sleep(forTimeInterval: delay)
+                    }
                 }
             }
+            if focusContext != nil || pressedPopupMenuItem {
+                // Let selection reach the menu/renderer before releasing synthetic
+                // focus. Right-click retains it for the next popup-selection call.
+                // Ending focus only deactivates the target; Guardian stays frontmost.
+                let rendererSettle = 0.100 * LockedUseInputTiming.skyClickDelayScale
+                if rendererSettle > 0 {
+                    Thread.sleep(forTimeInterval: rendererSettle)
+                }
+            }
+        }
+    }
+
+    // One lifecycle boundary for both acquired and inherited popup focus.
+    // Failed validation/posting always attempts cleanup, including right-click;
+    // only a successful right-click intentionally keeps synthetic focus.
+    static func dispatchWithFocusCleanup(
+        focusContext: SkyLightSyntheticFocusContext?,
+        button: LockedUseMouseButton,
+        endFocus: (SkyLightSyntheticFocusContext) throws -> Void,
+        dispatch: () throws -> Void
+    ) throws {
+        do {
+            try dispatch()
         } catch {
             if let focusContext {
-                try? spi.endSyntheticTargetFocus(focusContext)
+                try? endFocus(focusContext)
             }
             throw error
         }
-
-        if let focusContext {
-            // SkyLight delivery is asynchronous. Keep the target's AppKit
-            // synthetic active state long enough for Chromium's renderer hop
-            // to consume the final mouse-up before deactivating only the target.
-            let rendererSettle = 0.100 * LockedUseInputTiming.skyClickDelayScale
-            if rendererSettle > 0 {
-                Thread.sleep(forTimeInterval: rendererSettle)
-            }
-            try spi.endSyntheticTargetFocus(focusContext)
+        if button != .right, let focusContext {
+            try endFocus(focusContext)
         }
+    }
+
+    // Native NSMenu's modal tracking ignores PID-posted mouse events. Only an
+    // actual menu item at this app-local hit test takes AXPress; custom popup
+    // views and unsuccessful presses continue through the same sky_click path.
+    static func pressPopupMenuItem(
+        target: SkyClickTarget,
+        isPopupTarget: Bool,
+        button: LockedUseMouseButton,
+        clickCount: Int,
+        press: (pid_t, CGPoint) throws -> Bool = LockedUseClickDispatcher.pressAXPopupMenuItem
+    ) throws -> Bool {
+        guard isPopupTarget && button == .left && clickCount == 1 else { return false }
+        try LockedUseActionScope.validate()
+        let pressed = try press(target.pid, target.screenPoint)
+        try LockedUseActionScope.validate()
+        return pressed
+    }
+
+    static func pressAXPopupMenuItem(pid: pid_t, screenPoint: CGPoint) throws -> Bool {
+        var element: AXUIElement?
+        var role: CFTypeRef?
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid),
+                Float(screenPoint.x), Float(screenPoint.y), &element) == .success,
+              let element,
+              AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
+              role as? String == kAXMenuItemRole as String else { return false }
+        // Revalidate immediately before the action as well as around the probe.
+        try LockedUseActionScope.validate()
+        return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
     }
 
     private static func validate(target: SkyClickTarget) throws {
@@ -210,15 +326,14 @@ enum LockedUseClickDispatcher {
             target.screenPoint.y.isFinite,
             target.windowPoint.x.isFinite,
             target.windowPoint.y.isFinite,
+            target.windowBounds.origin.x.isFinite,
+            target.windowBounds.origin.y.isFinite,
+            target.windowBounds.width.isFinite,
+            target.windowBounds.height.isFinite,
             target.windowBounds.width > 0,
             target.windowBounds.height > 0
         else {
             throw LockedUseError.message("sky_click requires finite target coordinates and window bounds")
-        }
-
-        let localBounds = CGRect(origin: .zero, size: target.windowBounds.size)
-        guard localBounds.contains(target.windowPoint) else {
-            throw LockedUseError.message("sky_click target is outside the snapshot window bounds")
         }
 
         if NSRunningApplication(processIdentifier: target.pid)?.isHidden == true {
@@ -238,19 +353,20 @@ enum LockedUseClickDispatcher {
         }
     }
 
-    private static func stamp(
+    static func stamp(
         _ event: CGEvent,
         target: SkyClickTarget,
         windowPoint: CGPoint,
         clickState: Int64,
         phase: Int64,
+        button: LockedUseMouseButton,
         clickGroupID: Int64,
         spi: LockedUseInputSPI
     ) throws {
         let windowID = Int64(target.windowID)
         try spi.setIntegerField(event, field: EventField.gesturePhase, value: phase)
         try spi.setIntegerField(event, field: EventField.clickState, value: clickState)
-        try spi.setIntegerField(event, field: EventField.buttonNumber, value: 0)
+        try spi.setIntegerField(event, field: EventField.buttonNumber, value: event.type == .mouseMoved ? 0 : Int64(button.cgMouseButton.rawValue))
         try spi.setIntegerField(event, field: EventField.subtype, value: 3)
         try spi.setIntegerField(event, field: EventField.targetPID, value: Int64(target.pid))
         try spi.setIntegerField(event, field: EventField.windowNumber, value: windowID)

@@ -2,6 +2,18 @@
 
 English | [简体中文](./README_CN.md)
 
+`macos-locked-use` lets AI agents capture and operate host macOS windows behind privacy shields during a locked-screen session.
+
+```sh
+./scripts/build-locked-use.sh --identity "Apple Development: Your Name (TEAMID)"
+./dist/release-native/bin/locked-use enable
+./dist/release-native/bin/locked-use capture --app Finder --out /tmp/finder.png
+```
+
+Skill for AI agents: [`skills/macos-locked-use/SKILL.md`](./skills/macos-locked-use/SKILL.md)
+
+## Background
+
 Computer Use lets AI agents operate desktop applications via window screenshots, Accessibility trees, and keyboard/mouse events. During unattended execution, the core requirement is that the agent can continue operating the host desktop while anyone in front of the physical Mac cannot see the desktop or operate the machine.
 
 On macOS, however, locking the screen stops desktop window capture and restricts keyboard, mouse, and Accessibility input to the lock screen, blocking the agent; existing alternatives also fail to meet this requirement:
@@ -13,14 +25,6 @@ On macOS, however, locking the screen stops desktop window capture and restricts
 - **Targeted window operations**: Temporarily unlocks the graphical session and operates target applications via `ScreenCaptureKit` desktop-independent window capture and window-ID / PID targeted event dispatch.
 - **Full-screen shield and local-input relock**: Covers all displays with a full-screen blurred-wallpaper shield (showing the local user avatar, `<Host App> is Using Your Mac`, and `Press any key or click to unlock`); restores the system lock screen when the task ends, or relocks on local mouse movement or key press and requires one normal user unlock before running again (`awaitingManualUnlock`).
 - **Single-use authorization permit**: Pairs a `SecurityAgent` authorization plug-in with a `root` daemon to issue a single-use 5-second unlock permit after dual-process shields are active; when the task ends, the screen relocks for the user to unlock with password or Touch ID.
-
-```sh
-./scripts/build-locked-use.sh --identity "Apple Development: Your Name (TEAMID)"
-./dist/release-native/bin/locked-use enable
-./dist/release-native/bin/locked-use capture --app Finder --out /tmp/finder.png
-```
-
-Skill for AI agents: [`skills/macos-locked-use/SKILL.md`](./skills/macos-locked-use/SKILL.md)
 
 ## Integration Options
 
@@ -108,7 +112,7 @@ While shields are active, Guardian installs a session-level event tap: any globa
 locked-use status [--json]
 locked-use enable | disable | recover | end | lock
 locked-use capture (--app <name-or-bundle-id> | --pid <pid> | --window-id <id>) --out <file.png> [--require-locked]
-locked-use click <target> --x <coord> --y <coord> [--pixel] [--double] [--window-local | --screen] [--require-locked]
+locked-use click <target> --x <coord> --y <coord> [--button left|right] [--pixel] [--double] [--window-local | --screen] [--require-locked]
 locked-use type <target> --text <text> [--require-locked]
 locked-use key <target> --key <cmd+v|Return|...> [--require-locked]
 locked-use exec [--require-locked] -- <command> [args...]
@@ -116,6 +120,7 @@ locked-use exec [--require-locked] -- <command> [args...]
 
 - **Window selector (`<target>`)**: Accepts `--app`, `--pid`, and `--window-id` individually or combined; omitting `--window-id` selects the frontmost normal `layer == 0` window matching the selector.
 - **Coordinates and Retina scaling**: `capture` prints JSON containing `windowID`, `pid`, logical-point `bounds`, backing `pixelWidth` / `pixelHeight`, and `path`, capturing the target window without the shield overlay. `click` accepts screenshot pixel coordinates with `--pixel`, window-local logical points by default (`--window-local`), or global screen points with `--screen`.
+- **Mouse button**: `click` accepts `--button left|right` (default `left`). `--button right` opens a context menu and retains synthetic target focus. `capture` includes open child menus within the base window’s bounds. A subsequent single left `click` with the original window selector selects the covering native menu item or clicks the same-app popup window, then releases synthetic target focus.
 - **Management and execution subcommands**:
   - `enable` / `disable` / `recover`: Install or upgrade components, remove components and restore native authorization rules, or repair an interrupted installation. Updating the host app does not replace installed `/Library` components; re-run `enable` if `status` reports a version mismatch.
   - `exec [--require-locked] -- <cmd> [args...]`: Run a foreground subprocess (such as an Accessibility query script) inside the shielded session. With `--require-locked`, exits with `77` if the console is unlocked and no lease is active.
@@ -204,6 +209,8 @@ func clickAndType(connection: LockedUseConnection) throws {
     }
 }
 ```
+
+Both `LockedUseGUI.click` overloads accept `button: LockedUseMouseButton = .left`; pass `button: .right` to request a context menu, with the same coordinate and click-count semantics.
 
 For async single-window capture (`LockedUseGUI.captureWindow(windowID:outputPath:)`), pair `LockedUseConnection.beginAction` / `finishAction` with `LockedUseActionScope.withAsyncValidator`, keeping GUI operations serialized per connection.
 
