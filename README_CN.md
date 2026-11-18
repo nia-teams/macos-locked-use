@@ -23,7 +23,7 @@ Computer Use 通过窗口截图、无障碍树（Accessibility）与键鼠事件
 
 `macos-locked-use` 为 macOS 上的 Computer Use 提供独立的锁屏会话层，在不存储用户登录密码的前提下，实现**锁屏期间 Agent 可操作宿主窗口，而物理屏幕前的其他人看不到桌面、也无法操作**：
 - **定向窗口操作**：临时解锁图形会话，通过 `ScreenCaptureKit` 独立窗口采集与按窗口 ID / PID 定向事件投递操作目标应用。
-- **全屏遮罩与本地输入重锁**：所有显示器覆盖全屏模糊壁纸遮罩（显示当前用户头像、`<宿主应用名> is Using Your Mac` 与 `Press any key or click to unlock`）；任务结束时恢复系统锁屏，检测到本地鼠标移动或按键时重锁并要求用户先手动解锁一次后才能再次启用（`awaitingManualUnlock`）。
+- **全屏遮罩与本地输入重锁**：所有显示器覆盖全屏模糊壁纸遮罩（显示当前用户头像、`<宿主应用名> is Using Your Mac` 与 `Press any key or click to unlock`）；任务结束时恢复系统锁屏，检测到本地鼠标移动或按键时重锁并进入可配置冷却期（`awaitingManualUnlock`）；双守护释放后，正常手动解锁可立即复位。
 - **单次授权许可**：通过 `SecurityAgent` 授权插件与 `root` 守护进程配合，在双进程遮罩就绪后签发 5 秒有效期的单次解锁许可，任务结束后恢复锁屏并由用户以密码或 Touch ID 解锁。
 
 ## 接入方式
@@ -110,7 +110,8 @@ async function runTask() {
 
 ```sh
 locked-use status [--json]
-locked-use enable | disable | recover | end | lock
+locked-use enable [--cooldown <seconds|manual>]
+locked-use disable | recover | end | lock
 locked-use capture (--app <name-or-bundle-id> | --pid <pid> | --window-id <id>) --out <file.png> [--require-locked]
 locked-use click <target> --x <coord> --y <coord> [--button left|right] [--pixel] [--double] [--window-local | --screen] [--require-locked]
 locked-use type <target> --text <text> [--require-locked]
@@ -130,7 +131,7 @@ locked-use exec [--require-locked] -- <command> [args...]
 | 退出码 | 含义 | 调用方处理方式 |
 | --- | --- | --- |
 | `0`（或子命令退出码） | 操作完成；`exec` 在未发生保护中断时透传子进程退出码 | 继续后续步骤 |
-| `75` | 检测到本地键鼠输入或处于 `awaitingManualUnlock`，屏幕已重锁 | 停止任务并交回本地控制，不提示用户重新锁屏 |
+| `75` | 检测到本地键鼠输入或处于冷却期 / `awaitingManualUnlock`，屏幕已重锁 | 停止任务并交回本地控制，不提示用户重新锁屏 |
 | `76` | 租约达到 30 秒空闲超时或 300 秒时长上限，或运行期间另一终端调用 `locked-use end` 释放了租约 | 按需决定是否发起新租约 |
 | `77` | 未安装、缺少权限、或未满足 `--require-locked` | 检查 `locked-use status --json` 中的 `blockers` |
 | `64` | 命令行参数格式错误 | 修正调用参数 |
@@ -146,7 +147,7 @@ locked-use exec [--require-locked] -- <command> [args...]
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/nia-teams/macos-locked-use.git", from: "0.1.1")
+    .package(url: "https://github.com/nia-teams/macos-locked-use.git", from: "0.1.3")
 ],
 targets: [
     .target(
@@ -243,7 +244,15 @@ func clickAndType(connection: LockedUseConnection) throws {
 
 ## 组件协作流程
 
-宿主应用（或 `locked-use`）在锁屏状态下向 Broker 申请租约后，拉起 `LockedUseGuardian` 主进程与独立的 `Watchdog` 进程覆盖所有显示器。Broker 确认两个守护进程均已就绪后签发 5 秒有效期的单次许可，由 Guardian 唤醒屏幕并触发锁屏认证；`SecurityAgent` 加载 `LockedUseAuth.bundle` 向 Broker 核销该单次许可完成解锁。租约主动结束或到期（30 秒空闲 / 300 秒上限）时，恢复系统锁屏并回到 `idle`；若任务期间任一守护进程失联或检测到物理键鼠输入，屏幕重锁并转入 `awaitingManualUnlock`，待用户使用密码或 Touch ID 解锁一次后，Broker 轮询检测到同 UID、同 `auditSessionID` 的已解锁控制台会话再复位回 `idle`。
+宿主应用（或 `locked-use`）在锁屏状态下向 Broker 申请租约后，拉起 `LockedUseGuardian` 主进程与独立的 `Watchdog` 进程覆盖所有显示器。Broker 确认两个守护进程均已就绪后签发 5 秒有效期的单次许可，由 Guardian 唤醒屏幕并触发锁屏认证；`SecurityAgent` 加载 `LockedUseAuth.bundle` 向 Broker 核销该单次许可完成解锁。租约主动结束或到期（30 秒空闲 / 300 秒上限）时，恢复系统锁屏并回到 `idle`；若任务期间任一守护进程失联或检测到物理键鼠输入，屏幕重锁并转入 `awaitingManualUnlock`。双守护完全释放且无在途许可后，冷却到期复位回 `idle`（默认 60 秒，`manual` 模式不计时）。若先检测到同 UID、同 `auditSessionID` 经密码或 Touch ID 正常解锁的控制台会话，则在守护释放后立即复位。
+
+### 打断后的冷却恢复
+
+`locked-use enable --cooldown <seconds|manual>` 配置恢复策略：省略参数默认 **60 秒**；秒数取值范围为大于零且不超过 **86400** 的有限数；`manual` 表示需用密码或 Touch ID 正常解锁。宿主可通过 `LockedUseSettings.handle(arguments:)` 传入相同参数。
+
+打断当次恢复系统锁屏并返回退出码 **75**，调用方停止当前任务并交回本地控制。恢复期间保留 `awaitingManualUnlock` 状态，新租约请求同样返回 75。Guardian 与 Watchdog 双守护均释放且无在途许可后开始冷却计时；到期复位回 `idle` 并清理 `lease-recovery.json`。同 UID、同审计会话的控制台正常解锁在双守护释放后复位。无遮罩验证诊断仍需手动解锁。
+
+`status --json` 提供可选字段 `awaitingManualUnlock`、`cooldownRemainingSeconds`（向上取整秒数）、`cooldownConfiguredSeconds` 及 `blockers`。守护尚在释放或处于手动模式时，不输出剩余秒数。配置版本 1 新增 `cooldownSeconds`：字段缺失表示 60，`null` 表示手动模式。恢复记录保存冷却预算上限，进程重启后自首次单调时钟事件按当前配置上限恢复计时。
 
 ## 安全与风险
 

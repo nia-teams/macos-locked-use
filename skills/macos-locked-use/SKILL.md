@@ -11,7 +11,7 @@ Consecutive commands share a per-user lease (30s idle window, 300s max). Call `l
 
 Exit codes:
 - `0` (or `exec` child exit code): continue.
-- `75` (`awaitingManualUnlock`): local user input detected or a guard disconnected; screen is relocked. End the task and report progress. Once the user unlocks with password or Touch ID, the daemon resets to `idle`.
+- `75` (`awaitingManualUnlock`): local user input detected or a guard disconnected; screen is relocked. End the task and report progress. After both guards fully release, configured cooldown expiry (default 60s) resets the daemon to `idle`; password or Touch ID unlock resets it immediately. Do not retry the interrupted task in a tight loop.
 - `76`: 30s idle window or 300s max lease expired. Run the next command to open a new lease if work remains.
 - `77`: not ready or `--require-locked` unmet. Check `blockers` in `locked-use status --json`.
 
@@ -30,6 +30,8 @@ locked-use end
 `capture` prints JSON containing `windowID` and `pid`; pass `windowID` to subsequent `click / type / key` calls. `click` accepts screenshot pixel coordinates with `--pixel`, window-local logical points by default (`--window-local`), or global screen points with `--screen`.
 
 `click --button left|right` defaults to `left`; use `--button right` to open a context menu. `capture` includes open child menus within the base window’s bounds. A subsequent single left `click` with the original window selector selects a native menu item or clicks a same-app popup window, then releases target focus.
+
+Recovery policy: `locked-use enable --cooldown <seconds|manual>` accepts finite seconds greater than zero and at most 86400; `manual` requires normal unlock. `status --json` provides `awaitingManualUnlock`, `cooldownRemainingSeconds`, `cooldownConfiguredSeconds`, and actionable `blockers`. Missing remaining time may mean guards are still releasing or manual-only policy; use blockers rather than guessing. Exit 75 also applies to calls rejected during cooldown.
 
 ## Host Integration
 

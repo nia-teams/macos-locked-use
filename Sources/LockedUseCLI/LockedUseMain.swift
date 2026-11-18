@@ -28,6 +28,8 @@ struct LockedUseMain {
                 if LockedUseSession.current().state != .locked {
                     try LockedUseScreenLock.lockImmediately()
                 }
+            case .enable(let cooldown):
+                _ = try LockedUseSettings.handle(arguments: ["locked-use", "enable", "--cooldown", cooldown.map { String($0) } ?? "manual"])
             case .manage(let action):
                 _ = try LockedUseSettings.handle(arguments: ["locked-use", action])
             }

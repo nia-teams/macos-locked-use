@@ -22,7 +22,7 @@ enum BrokerMain {
             // still has to pass the same-team strict signature verification.
             _ = try LockedUseComponentValidation.current(team: team)
             let server = try BrokerServer(approvals: approvals, enabled: configuration.enabled,
-                backendValidated: true, validationMode: validation)
+                backendValidated: true, cooldownSeconds: configuration.cooldownSeconds, validationMode: validation)
             try server.start()
             withExtendedLifetime(server) { dispatchMain() }
         } catch {
@@ -61,9 +61,9 @@ private final class BrokerServer: @unchecked Sendable {
     private var lastRecoveryData: Data?
     private let instanceLock: Int32
 
-    init(approvals: LockedUseClientApprovals, enabled: Bool, backendValidated: Bool, validationMode: Bool) throws {
+    init(approvals: LockedUseClientApprovals, enabled: Bool, backendValidated: Bool, cooldownSeconds: TimeInterval?, validationMode: Bool) throws {
         self.approvals = approvals
-        coordinator = .init(enabled: enabled, backendValidated: backendValidated, requiresWatchdog: true, validationMode: validationMode)
+        coordinator = .init(enabled: enabled, backendValidated: backendValidated, requiresWatchdog: true, cooldownSeconds: cooldownSeconds, validationMode: validationMode)
         try Self.validateRunDirectory()
         let fd = open("/Library/Application Support/LockedUse/run/broker.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw BrokerError.message("instance lock unavailable") }
@@ -83,7 +83,7 @@ private final class BrokerServer: @unchecked Sendable {
             recoverySeed = nil
         }
         ownerClientToken = recoverySeed?.originalClientToken
-        coordinator = .init(enabled: enabled, backendValidated: backendValidated, requiresWatchdog: true, recovery: recoverySeed, bootSessionID: bootID, validationMode: validationMode)
+        coordinator = .init(enabled: enabled, backendValidated: backendValidated, requiresWatchdog: true, recovery: recoverySeed, bootSessionID: bootID, cooldownSeconds: cooldownSeconds, validationMode: validationMode)
     }
 
     func start() throws {

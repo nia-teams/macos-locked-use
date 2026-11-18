@@ -118,6 +118,9 @@ public struct LockedUseDiagnostics: Codable, Sendable {
     public let guardianInputMonitoring: Bool?
     public let otherAuthorizationPlugins: [String]
     public let blockers: [String]
+    public var cooldownRemainingSeconds: Int? = nil
+    public var cooldownConfiguredSeconds: Int? = nil
+    public var awaitingManualUnlock: Bool? = nil
 
     /// Never enables the experimental backend from environment variables, files
     /// written by the user, or the presence of another vendor's authorization plugin.
@@ -153,16 +156,28 @@ public struct LockedUseDiagnostics: Codable, Sendable {
         let protectedSession = LockedUseSessionHolder.statusIfActive()
         let currentSession = LockedUseSession.current()
         var awaitingManualUnlock = false
+        var cooldownRemainingSeconds: Int?
+        var shieldsReleasing = false
         if configuration != nil,
            let requirement = try? LockedUseSigningIdentity.brokerRequirement(),
            let observer = try? LockedUseIPCClient(endpoint: .observer, brokerRequirement: requirement) {
             if let reply = try? observer.request(.init(operation: .status, session: currentSession)) {
                 awaitingManualUnlock = reply.phase == .awaitingManualUnlock
+                shieldsReleasing = awaitingManualUnlock && reply.guardsReleased == false
+                cooldownRemainingSeconds = reply.cooldownRemainingSeconds.map { max(1, Int(ceil($0))) }
             }
             observer.close()
         }
         if awaitingManualUnlock {
             available = false
+        }
+        let recoveryBlocker: String
+        if shieldsReleasing {
+            recoveryBlocker = "Locked Use is finishing shield release after local input or guard interruption; wait a moment or unlock this Mac manually once shields release."
+        } else if let remaining = cooldownRemainingSeconds {
+            recoveryBlocker = "Locked Use is cooling down after local input or guard interruption and will recover automatically in about \(remaining)s (or unlock this Mac manually to recover immediately)."
+        } else {
+            recoveryBlocker = "Unlock this Mac manually once before Locked Use can run again."
         }
         return .init(
             schemaVersion: 1, stage: available ? "enabled" : configuration == nil ? "not-installed" : "unavailable", enabled: configuration?.enabled ?? false, available: available,
@@ -178,10 +193,13 @@ public struct LockedUseDiagnostics: Codable, Sendable {
             guardianInputMonitoring: guardianPermissions["inputMonitoring"],
             otherAuthorizationPlugins: others,
             blockers: available ? [] : (awaitingManualUnlock ? [
-                "Unlock this Mac manually once before Locked Use can run again."
+                recoveryBlocker
             ] : [
                 "Run locked-use enable and complete host permissions for Accessibility, Screen Recording, and Input Monitoring. Installation, client approval, signed components and authentication policy must be intact."
-            ])
+            ]),
+            cooldownRemainingSeconds: cooldownRemainingSeconds,
+            cooldownConfiguredSeconds: configuration?.cooldownSeconds.map { Int($0.rounded()) },
+            awaitingManualUnlock: awaitingManualUnlock
         )
     }
 

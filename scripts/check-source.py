@@ -105,7 +105,7 @@ class SourceTests(unittest.TestCase):
         self.assertNotIn('/bin/chmod -h -N', enable)
         self.assertNotIn('--noxattr', enable)
         self.assertNotIn('--norsrc', enable)
-        self.assertEqual(read("VERSION").strip(), "0.1.1")
+        self.assertEqual(read("VERSION").strip(), "0.1.3")
         tests = read("Tests/LockedUseKitTests/LockedUseStagedTreeTests.swift")
         for token in ["testVersionedFramework", "testHelperAndAppRoots", "testAbsoluteEscaping",
                       "testUnsafeModes", "testMutatingACLs", "testRegularFileRoot", "testTrailingSlashTargetsRequireDirectoriesAcrossChains"]:
@@ -124,6 +124,52 @@ class SourceTests(unittest.TestCase):
         session = read("Sources/LockedUseKit/LockedUseDiagnostics.swift")
         for token in ["SLSSessionCopyAllSessionProperties", "CGSSessionCopyAllSessionProperties", "@convention(c) () -> Unmanaged<CFArray>?", "CFGetTypeID(number) == CFBooleanGetTypeID()"]:
             self.assertIn(token, session)
+
+    def test_cooldown_configuration_release_barrier_and_durable_cleanup(self):
+        configuration = read("Sources/LockedUseKit/LockedUseBrokerConfiguration.swift")
+        for token in ["defaultCooldownSeconds: TimeInterval = 60", "maximumCooldownSeconds: TimeInterval = 86_400",
+                      "cooldownSeconds: TimeInterval?", "validatedCooldownSeconds", "value.isFinite", "value <= 0",
+                      "value > maximumCooldownSeconds", "c.contains(.cooldownSeconds)", "c.decodeNil(forKey: .cooldownSeconds)",
+                      "c.encodeNil(forKey: .cooldownSeconds)", "schemaVersion = 1"]:
+            self.assertIn(token, configuration)
+        for name in ["LockedUseCommand.swift", "LockedUseSettings.swift"]:
+            self.assertIn("--cooldown", read("Sources/LockedUseKit/" + name))
+        self.assertIn("LockedUseCommand.parse(Array(arguments.dropFirst()))", read("Sources/LockedUseKit/LockedUseSettings.swift"))
+        installer = read("Sources/Installer/InstallerMain.swift")
+        self.assertIn('LockedUseCommand.parse(["enable"] + rest)', installer)
+        self.assertIn("cooldownSeconds: existing.cooldownSeconds", installer)
+        coordinator = read("Sources/LockedUseKit/LockedUseBrokerCoordinator.swift")
+        arm = coordinator[coordinator.index("private mutating func armCooldownIfReady"):coordinator.index("public mutating func tick")]
+        tick = coordinator[coordinator.index("public mutating func tick"):coordinator.index("public mutating func disconnected")]
+        for method in [arm, tick]:
+            for token in ["machine.phase == .awaitingManualUnlock", "isFullyReleased", "issued == nil", "unshieldedDiagnostic == nil", "!recoveryProbe"]:
+                self.assertIn(token, method)
+        apply = coordinator[coordinator.index("private mutating func apply"):coordinator.index("private mutating func reply")]
+        self.assertIn("armCooldownIfReady(now: receiptTime)", apply)
+        self.assertIn("cooldownDeadline = now + remaining", arm)
+        self.assertIn("now >= deadline", tick)
+        self.assertIn("machine.completeCooldown(now: now)", tick)
+        for operation in ["guardianReleased", "watchdogReleased"]:
+            section = coordinator.split("case ." + operation + ":", 1)[1].split("        case .", 1)[0]
+            self.assertIn("armCooldownIfReady(now: now)", section)
+        record = coordinator[coordinator.index("public func recoveryRecord"):coordinator.index("public mutating func handle")]
+        self.assertIn("phase != .idle || !isFullyReleased", record)
+        self.assertIn("cooldownRemainingSeconds: cooldownRemainingAtRelease", record)
+        self.assertNotIn("cooldownDeadline -", record)
+        self.assertIn("min(cooldownSeconds, recovery.cooldownRemainingSeconds ?? cooldownSeconds)", coordinator)
+        broker = read("Sources/Broker/BrokerMain.swift")
+        self.assertIn("cooldownSeconds: configuration.cooldownSeconds", broker)
+        persistence = broker[broker.index("private func persistRecovery"):broker.index("private func persistValidation")]
+        for token in ["lease-recovery.json", "if data == lastRecoveryData { return }", "unlink(path)", "fsync(directory)"]:
+            self.assertIn(token, persistence)
+        self.assertIn("cooldownRemainingSeconds", read("Sources/LockedUseKit/LockedUseRecoveryRecord.swift"))
+        self.assertIn("public let cooldownRemainingSeconds: TimeInterval?", read("Sources/LockedUseKit/LockedUseIPC.swift"))
+        diagnostics = read("Sources/LockedUseKit/LockedUseDiagnostics.swift")
+        self.assertIn("reply.guardsReleased == false", diagnostics)
+        self.assertLess(diagnostics.index("if shieldsReleasing {"), diagnostics.index("else if let remaining = cooldownRemainingSeconds"))
+        for token in ["cooldownRemainingSeconds: Int?", "cooldownConfiguredSeconds: Int?", "awaitingManualUnlock: Bool?"]:
+            self.assertIn(token, diagnostics)
+        self.assertTrue((ROOT / "Tests/LockedUseKitTests/LockedUseCooldownTests.swift").is_file())
 
     def test_structured_exec_stops_and_gui_dispatch(self):
         error = read("Sources/LockedUseKit/LockedUseError.swift")

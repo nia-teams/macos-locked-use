@@ -7,11 +7,13 @@ public enum LockedUseCommand: Equatable {
     case end
     case lock
     case manage(String)
+    case enable(cooldownSeconds: TimeInterval?)
     case help
 
     public static let usage = """
     Usage: locked-use status [--json]
-           locked-use enable | disable | recover | certify | end | lock
+           locked-use enable [--cooldown <seconds|manual>]
+           locked-use disable | recover | certify | end | lock
            locked-use exec [--require-locked] -- <command> [args...]
            locked-use click (--app <name-or-bundle-id> | --pid <pid> | --window-id <id>) --x <coord> --y <coord> [--button left|right] [--pixel] [--double] [--screen | --window-local] [--require-locked]
            locked-use type <target> --text <text> [--require-locked]
@@ -24,6 +26,12 @@ public enum LockedUseCommand: Equatable {
     to human; 76: lease expired/relocked; 77: unavailable/precondition; 64: usage.
     """
 
+    public static func parseCooldown(_ value: String) throws -> TimeInterval? {
+        if value == "manual" { return nil }
+        guard let seconds = Double(value) else { throw LockedUseError.usage(usage) }
+        return try LockedUseBrokerConfiguration.validatedCooldownSeconds(seconds)
+    }
+
     public static func parse(_ arguments: [String]) throws -> Self {
         switch arguments {
         case [], ["--help"], ["-h"]: return .help
@@ -35,6 +43,9 @@ public enum LockedUseCommand: Equatable {
         }
         if arguments.count == 1, ["enable", "disable", "recover", "certify"].contains(arguments[0]) {
             return .manage(arguments[0])
+        }
+        if arguments.count == 3, arguments[0] == "enable", arguments[1] == "--cooldown" {
+            return .enable(cooldownSeconds: try parseCooldown(arguments[2]))
         }
         if let first = arguments.first, LockedUseGUICommand.Action(rawValue: first) != nil {
             return .gui(try LockedUseGUICommand.parse(arguments))

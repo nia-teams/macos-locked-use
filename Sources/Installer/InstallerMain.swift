@@ -34,10 +34,17 @@ struct InstallerMain {
                   lockInfo.st_mode & 0o077 == 0, ocu_has_mutating_acl(lockFD) == 0,
                   flock(lockFD, LOCK_EX | LOCK_NB) == 0 else { throw InstallError.existingInstallation }
             let args = Array(CommandLine.arguments.dropFirst())
-            if [4, 5].contains(args.count), args[0] == "install" {
-                guard let uid = UInt32(args[2]), uid > 0,
+            if args.first == "install" {
+                guard args.count >= 4, let uid = UInt32(args[2]), uid > 0,
                       ["validation", "production"].contains(args[3]) else { throw InstallError.invalidArguments }
-                try install(source: URL(fileURLWithPath: args[1], isDirectory: true), uid: uid, team: team, validation: args[3] == "validation", hostIdentifier: args.count == 5 ? args[4] : nil)
+                var rest = Array(args.dropFirst(4))
+                let host = rest.first.flatMap { $0.hasPrefix("--") ? nil : $0 }
+                if host != nil { rest.removeFirst() }
+                let command = try LockedUseCommand.parse(["enable"] + rest)
+                let cooldown: TimeInterval?
+                if case .enable(let value) = command { cooldown = value }
+                else { cooldown = LockedUseBrokerConfiguration.defaultCooldownSeconds }
+                try install(source: URL(fileURLWithPath: args[1], isDirectory: true), uid: uid, team: team, validation: args[3] == "validation", hostIdentifier: host, cooldownSeconds: cooldown)
             } else if args == ["uninstall"] { try uninstall(team: team) }
             else if args == ["recover"] { try recover(team: team) }
             else if args == ["reconcile-stopped-guards"] { try reconcileStoppedGuards() }
@@ -171,7 +178,7 @@ struct InstallerMain {
         }
     }
 
-    private static func install(source: URL, uid: UInt32, team: String, validation: Bool, hostIdentifier: String?) throws {
+    private static func install(source: URL, uid: UInt32, team: String, validation: Bool, hostIdentifier: String?, cooldownSeconds: TimeInterval?) throws {
         try trustedTree(source, allowContainedSymlinksUnder: source.appendingPathComponent("Client.app", isDirectory: true))
         let broker = source.appendingPathComponent("LockedUseService")
         _ = try verify(broker, id: service, team: team)
@@ -201,7 +208,7 @@ struct InstallerMain {
             .init(userID: uid, role: .guardian, signingIdentifier: "com.nia-teams.locked-use.guardian", teamIdentifier: team)
         ])
         try write(approvals, name: "clients.json")
-        try write(LockedUseBrokerConfiguration(enabled: true), name: "configuration.json")
+        try write(LockedUseBrokerConfiguration(enabled: true, cooldownSeconds: cooldownSeconds), name: "configuration.json")
         for name in ["LockedUseService", guardianName, "LockedUseInstaller"] {
             try FileManager.default.copyItem(at: source.appendingPathComponent(name), to: root.appendingPathComponent(name))
         }
@@ -234,6 +241,7 @@ struct InstallerMain {
         }
     }
     private static func promote(team: String) throws {
+        let existing = try LockedUseBrokerConfiguration.loadInstalled()
         let evidence = try LockedUseComponentValidation.current(team: team)
         let report = try LockedUseValidationReport.loadInstalled()
         guard report.canPromote(current: evidence) else { throw InstallError.changedPolicy }
@@ -249,7 +257,7 @@ struct InstallerMain {
         guard reply.result != .denied else { throw InstallError.changedPolicy }
         // No active or incompletely released lease can cross this service epoch.
         try run("/bin/launchctl", ["bootout", "system/" + service])
-        try write(LockedUseBrokerConfiguration(enabled: true, validatedOSBuild: evidence.osBuild,
+        try write(LockedUseBrokerConfiguration(enabled: true, cooldownSeconds: existing.cooldownSeconds, validatedOSBuild: evidence.osBuild,
             validatedBrokerHash: evidence.brokerHash, validatedGuardianHash: evidence.guardianHash,
             validatedPluginHash: evidence.pluginHash), name: "configuration.json", replacing: true)
         definition["ProgramArguments"] = [root.appendingPathComponent("LockedUseService").path, "--serve"]

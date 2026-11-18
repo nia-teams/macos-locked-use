@@ -19,6 +19,10 @@ public struct LockedUseBrokerCoordinator: Sendable {
         }
     }
     public enum Failure: Error { case denied, staleEvidence, malformed, unavailable }
+    private let cooldownSeconds: TimeInterval?
+    public private(set) var cooldownDeadline: TimeInterval?
+    // Stable per release epoch: persistence must not rewrite/fsync on each tick.
+    private var cooldownRemainingAtRelease: TimeInterval?
     private var accepting = true
     private var unshieldedDiagnostic: LockedUseUnshieldedDiagnostic?
     private let requiresWatchdog: Bool
@@ -59,13 +63,20 @@ public struct LockedUseBrokerCoordinator: Sendable {
     public var stopReason: LockedUseStateMachine.StopReason? { machine.stopReason ?? lastStopReason }
     public var owner: LockedUseStateMachine.Owner? { machine.owner ?? connectionOwner }
 
-    public init(enabled: Bool, backendValidated: Bool, requiresWatchdog: Bool = false, recovery: LockedUseRecoveryRecord? = nil, bootSessionID: String = UUID().uuidString, validationMode: Bool = false) {
+    public init(enabled: Bool, backendValidated: Bool, requiresWatchdog: Bool = false, recovery: LockedUseRecoveryRecord? = nil, bootSessionID: String = UUID().uuidString, cooldownSeconds: TimeInterval? = LockedUseBrokerConfiguration.defaultCooldownSeconds, validationMode: Bool = false) {
+        if let cooldownSeconds {
+            precondition(cooldownSeconds.isFinite && cooldownSeconds > 0 && cooldownSeconds <= LockedUseBrokerConfiguration.maximumCooldownSeconds)
+        }
+        self.cooldownSeconds = cooldownSeconds
         self.validationMode = validationMode
         machine = .init(validationWait: validationMode)
         prerequisites = .init(enabled: enabled, backendValidated: backendValidated, clientAuthorized: true)
         self.requiresWatchdog = requiresWatchdog
         self.bootSessionID = bootSessionID
         if let recovery {
+            if recovery.fullyReleased, let cooldownSeconds {
+                cooldownRemainingAtRelease = min(cooldownSeconds, recovery.cooldownRemainingSeconds ?? cooldownSeconds)
+            }
             recovering = true
             ownerContext = recovery.owner; guardianContext = recovery.guardian; watchdogContext = recovery.watchdog
             connectionOwner = .init(connectionID: recovery.owner.id, userID: recovery.owner.userID, auditSessionID: recovery.owner.auditSessionID)
@@ -93,7 +104,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
         guard let leaseID, let ownerContext, phase != .idle || !isFullyReleased else { return nil }
         return .init(leaseID: leaseID, owner: ownerContext, originalClientToken: clientToken,
             guardian: guardianContext, watchdog: watchdogContext, watchdogChallenge: watchdogChallenge,
-            everGranted: everGranted, observedUnlocked: observedUnlocked, agentDrained: agentDrained, fullyReleased: isFullyReleased, bootSessionID: bootSessionID)
+            everGranted: everGranted, observedUnlocked: observedUnlocked, agentDrained: agentDrained, fullyReleased: isFullyReleased, cooldownRemainingSeconds: cooldownRemainingAtRelease, bootSessionID: bootSessionID)
     }
 
     public mutating func handle(_ message: LockedUseIPCMessage, context: Context,
@@ -120,7 +131,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
         case .status:
             // Only the owner may acknowledge a manual unlock, using a native
             // session observation matching its kernel connection identity.
-            if (isOwner(context) || context.role == .observer && sameSession(context)), phase == .awaitingManualUnlock, let session = message.session {
+            if (isOwner(context) || context.role == .observer && sameSession(context)), isFullyReleased, issued == nil, phase == .awaitingManualUnlock, let session = message.session {
                 try check(session: session, context: context)
                 try apply(machine.observe(session: session, now: now))
             }
@@ -130,7 +141,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
             try freshGuards(now: now)
             return reply(message, context: context)
         case .validationManual:
-            guard context.role == .agent, sameSession(context), isFullyReleased,
+            guard context.role == .agent, sameSession(context), isFullyReleased, issued == nil,
                   phase == .idle || phase == .awaitingManualUnlock,
                   let session = message.session, session.state == .unlocked else { throw Failure.denied }
             try check(session: session, context: context)
@@ -151,6 +162,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
             let effects = try machine.begin(owner: owner, session: session, prerequisites: prerequisites, now: now)
             // A new fully released idle lease owns a fresh permit epoch. Old
             // lease ids/nonces are never accepted by the new state machine.
+            cooldownDeadline = nil; cooldownRemainingAtRelease = nil
             registry = LockedUsePermitRegistry()
             connectionOwner = owner
             ownerContext = context; guardianContext = nil; watchdogContext = nil
@@ -204,6 +216,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
             guard isGuardian(context), message.leaseID == leaseID, releaseSent,
                   phase == .idle || phase == .awaitingManualUnlock else { throw Failure.denied }
             guardianID = nil; guardianContext = nil
+            armCooldownIfReady(now: now)
             return reply(message, context: context)
         case .ownerRecoveryHello:
             guard isOwner(context), message.leaseID == leaseID, let session = message.session else { throw Failure.denied }
@@ -246,6 +259,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
                   phase == .idle || phase == .awaitingManualUnlock else { throw Failure.denied }
             watchdogContext = nil
             if guardianGone { guardianID = nil; guardianContext = nil }
+            armCooldownIfReady(now: now)
             return reply(message, context: context)
         case .pluginClaim:
             guard context.role == .plugin, sameAuditSession(context), phase == .authorizing,
@@ -320,11 +334,28 @@ public struct LockedUseBrokerCoordinator: Sendable {
         try apply(machine.observe(session: session, now: now))
     }
 
+    private mutating func armCooldownIfReady(now: TimeInterval) {
+        if machine.phase == .idle {
+            cooldownDeadline = nil; cooldownRemainingAtRelease = nil
+        }
+        guard machine.phase == .awaitingManualUnlock, isFullyReleased, issued == nil,
+              unshieldedDiagnostic == nil, !recoveryProbe, let cooldownSeconds, cooldownDeadline == nil else { return }
+        let remaining = min(cooldownSeconds, cooldownRemainingAtRelease ?? cooldownSeconds)
+        cooldownRemainingAtRelease = remaining
+        cooldownDeadline = now + remaining
+    }
+
     public mutating func tick(now: TimeInterval) throws {
+        receiptTime = now
         try unshieldedDiagnostic?.tick(now: now)
         try registry.expire(now: now)
-        receiptTime = now
         try apply(machine.tick(now: now))
+        armCooldownIfReady(now: now)
+        if machine.phase == .awaitingManualUnlock, isFullyReleased, issued == nil,
+           unshieldedDiagnostic == nil, !recoveryProbe, let deadline = cooldownDeadline, now >= deadline {
+            try machine.completeCooldown(now: now)
+            cooldownDeadline = nil; cooldownRemainingAtRelease = nil
+        }
         if requiresWatchdog, watchdogContext != nil, now - watchdogLastReport >= 1.5,
            ![.idle, .relocking, .awaitingManualUnlock].contains(phase), let owner {
             try apply(machine.end(owner: owner, reason: .guardLost))
@@ -350,6 +381,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
             guardianID = nil
             guardianContext = nil
         }
+        armCooldownIfReady(now: receiptTime)
     }
 
     /// Called only after the daemon observes ESRCH for the kernel-verified
@@ -408,6 +440,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
             case .releaseGuards: guardianEffects.append("releaseGuards")
             }
         }
+        armCooldownIfReady(now: receiptTime)
     }
     private mutating func reply(_ message: LockedUseIPCMessage, context: Context,
                                token: Data? = nil, authorized: Bool = false) -> LockedUseIPCReply {
@@ -428,7 +461,9 @@ public struct LockedUseBrokerCoordinator: Sendable {
             leaseID: isOwner(context) || isGuardian(context) || isWatchdog(context) || context.id == pluginID ? leaseID : nil,
             token: token, effects: effects, guardsReleased: isFullyReleased,
             recoveryProbePrepared: recoveryProbe ? recoveryProbePrepared : nil, startupDeadline: machine.startupDeadline,
-            validationConfirmation: isGuardian(context), stopReason: stopReason)
+            validationConfirmation: isGuardian(context), stopReason: stopReason,
+            cooldownRemainingSeconds: phase == .awaitingManualUnlock && isFullyReleased && issued == nil && unshieldedDiagnostic == nil && !recoveryProbe
+                ? cooldownDeadline.map { max(0, $0 - receiptTime) } : nil)
     }
     private func randomToken() throws -> Data {
         var bytes = [UInt8](repeating: 0, count: 32)

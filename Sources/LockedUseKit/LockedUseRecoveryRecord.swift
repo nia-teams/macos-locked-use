@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 /// A durable revocation fence, never a reusable authorization permit. Recovery
-/// can only drain/relock the old epoch and then require a normal manual unlock.
+/// can only drain/relock the old epoch before cooldown or manual recovery.
 public struct LockedUseRecoveryRecord: Codable, Sendable {
     public let schemaVersion: Int
     public let bootSessionID: String
@@ -16,14 +16,16 @@ public struct LockedUseRecoveryRecord: Codable, Sendable {
     public let observedUnlocked: Bool
     public let agentDrained: Bool
     public let fullyReleased: Bool
+    public let cooldownRemainingSeconds: TimeInterval?
 
     public init(leaseID: UUID, owner: LockedUseBrokerCoordinator.Context, originalClientToken: Data,
                 guardian: LockedUseBrokerCoordinator.Context?, watchdog: LockedUseBrokerCoordinator.Context?,
                 watchdogChallenge: Data?, everGranted: Bool, observedUnlocked: Bool,
-                agentDrained: Bool, fullyReleased: Bool, bootSessionID: String = UUID().uuidString) {
+                agentDrained: Bool, fullyReleased: Bool, cooldownRemainingSeconds: TimeInterval? = nil, bootSessionID: String = UUID().uuidString) {
         schemaVersion = 1; self.bootSessionID = bootSessionID; self.leaseID = leaseID; self.owner = owner; self.originalClientToken = originalClientToken
         self.guardian = guardian; self.watchdog = watchdog; self.watchdogChallenge = watchdogChallenge
         self.everGranted = everGranted; self.observedUnlocked = observedUnlocked
+        self.cooldownRemainingSeconds = cooldownRemainingSeconds
         self.agentDrained = agentDrained; self.fullyReleased = fullyReleased
     }
 
@@ -32,7 +34,8 @@ public struct LockedUseRecoveryRecord: Codable, Sendable {
             context.userID > 0 && context.auditSessionID > 0 && context.processID > 0
                 && context.auditToken.count == 32 && !context.codeHash.isEmpty && context.codeHash.count <= 64
         }
-        guard schemaVersion == 1, UUID(uuidString: bootSessionID) != nil, valid(owner), owner.role == .agent,
+        guard cooldownRemainingSeconds.map({ $0.isFinite && $0 >= 0 && $0 <= LockedUseBrokerConfiguration.maximumCooldownSeconds }) ?? true,
+              schemaVersion == 1, UUID(uuidString: bootSessionID) != nil, valid(owner), owner.role == .agent,
               originalClientToken.count == 32,
               guardian.map({ valid($0) && $0.role == .guardian && $0.userID == owner.userID && $0.auditSessionID == owner.auditSessionID }) ?? true,
               watchdog.map({ valid($0) && $0.role == .guardian && $0.userID == owner.userID && $0.auditSessionID == owner.auditSessionID }) ?? true,

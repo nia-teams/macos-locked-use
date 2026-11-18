@@ -15,10 +15,14 @@ public enum LockedUseSettings {
     public static func handle(arguments: [String], hostBundleIdentifier: String? = nil, permissionHost: PermissionHost = .host) throws -> Bool {
         guard arguments.first == "locked-use", arguments.count > 1,
               ["enable", "disable", "recover", "certify", "settings"].contains(arguments[1]) else { return false }
-        guard arguments.count == 2 else {
-            throw LockedUseError.message("Usage: locked-use enable | disable | recover | certify | settings")
-        }
         let action = arguments[1]
+        var cooldown: TimeInterval? = LockedUseBrokerConfiguration.defaultCooldownSeconds
+        if action == "settings" {
+            guard arguments.count == 2 else { throw LockedUseError.usage(LockedUseCommand.usage) }
+        } else {
+            let command = try LockedUseCommand.parse(Array(arguments.dropFirst()))
+            if case .enable(let seconds) = command { cooldown = seconds }
+        }
         if action == "settings" {
             let app = NSApplication.shared
             app.setActivationPolicy(.accessory)
@@ -33,7 +37,7 @@ public enum LockedUseSettings {
             case .alertSecondButtonReturn: try disable()
             default: break
             }
-        } else if action == "enable" { try enable(hostBundleIdentifier: hostBundleIdentifier, permissionHost: permissionHost) }
+        } else if action == "enable" { try enable(cooldownSeconds: cooldown, hostBundleIdentifier: hostBundleIdentifier, permissionHost: permissionHost) }
         else if action == "certify" { try certify() }
         else if action == "recover" { try enable(recovering: true, hostBundleIdentifier: hostBundleIdentifier, permissionHost: permissionHost) }
         else { try disable() }
@@ -55,7 +59,7 @@ public enum LockedUseSettings {
         guard process.terminationStatus == 0 else { throw LockedUseError.message("Locked Use administrator installation did not complete. Existing recovery records were retained.") }
         print(text, terminator: "")
     }
-    private static func enable(recovering: Bool = false, hostBundleIdentifier: String? = nil, permissionHost: PermissionHost = .host) throws {
+    private static func enable(recovering: Bool = false, cooldownSeconds: TimeInterval? = LockedUseBrokerConfiguration.defaultCooldownSeconds, hostBundleIdentifier: String? = nil, permissionHost: PermissionHost = .host) throws {
         guard LockedUseSession.current().state == .unlocked else { throw LockedUseError.message("Unlock the Mac normally before administrator installation or recovery.") }
         let identity = try LockedUseSigningIdentity.current()
         let host = hostBundleIdentifier ?? LockedUseHost.currentBundle.bundleIdentifier
@@ -100,7 +104,7 @@ public enum LockedUseSettings {
             "/usr/sbin/chown -hR -P root:wheel " + quote(stage) + "\n" +
             "/bin/chmod -R -P go-w " + quote(stage) + "\n" +
             "/usr/bin/codesign --verify --strict -R " + quote(requirement) + " " + quote(stage + "/LockedUseInstaller") + "\n" +
-            (recovering ? (quote(stage + "/LockedUseInstaller") + " recover") : (preinstalledCommand + quote(stage + "/LockedUseInstaller") + " install " + quote(stage) + " " + String(identity.userID) + " " + "production " + quote(host)))
+            (recovering ? (quote(stage + "/LockedUseInstaller") + " recover") : (preinstalledCommand + quote(stage + "/LockedUseInstaller") + " install " + quote(stage) + " " + String(identity.userID) + " " + "production " + quote(host) + " --cooldown " + quote(cooldownSeconds.map { String($0) } ?? "manual")))
         try elevate(shell)
         if !recovering { try requestPermissions(permissionHost: permissionHost) }
     }

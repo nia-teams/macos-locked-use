@@ -23,7 +23,7 @@ On macOS, however, locking the screen stops desktop window capture and restricts
 
 `macos-locked-use` provides a standalone lock-screen session layer for Computer Use on macOS so that, without storing the user's login password, **the agent can operate host windows while anyone in front of the screen can neither see the desktop nor operate the Mac**:
 - **Targeted window operations**: Temporarily unlocks the graphical session and operates target applications via `ScreenCaptureKit` desktop-independent window capture and window-ID / PID targeted event dispatch.
-- **Full-screen shield and local-input relock**: Covers all displays with a full-screen blurred-wallpaper shield (showing the local user avatar, `<Host App> is Using Your Mac`, and `Press any key or click to unlock`); restores the system lock screen when the task ends, or relocks on local mouse movement or key press and requires one normal user unlock before running again (`awaitingManualUnlock`).
+- **Full-screen shield and local-input relock**: Covers all displays with a full-screen blurred-wallpaper shield (showing the local user avatar, `<Host App> is Using Your Mac`, and `Press any key or click to unlock`); restores the system lock screen when the task ends, or relocks on local mouse movement or key press and enters configurable cooldown recovery (`awaitingManualUnlock`); normal user unlock resets immediately after guard release.
 - **Single-use authorization permit**: Pairs a `SecurityAgent` authorization plug-in with a `root` daemon to issue a single-use 5-second unlock permit after dual-process shields are active; when the task ends, the screen relocks for the user to unlock with password or Touch ID.
 
 ## Integration Options
@@ -110,7 +110,8 @@ While shields are active, Guardian installs a session-level event tap: any globa
 
 ```sh
 locked-use status [--json]
-locked-use enable | disable | recover | end | lock
+locked-use enable [--cooldown <seconds|manual>]
+locked-use disable | recover | end | lock
 locked-use capture (--app <name-or-bundle-id> | --pid <pid> | --window-id <id>) --out <file.png> [--require-locked]
 locked-use click <target> --x <coord> --y <coord> [--button left|right] [--pixel] [--double] [--window-local | --screen] [--require-locked]
 locked-use type <target> --text <text> [--require-locked]
@@ -130,7 +131,7 @@ locked-use exec [--require-locked] -- <command> [args...]
 | Exit Code | Meaning | Caller Handling |
 | --- | --- | --- |
 | `0` (or child exit code) | Completed; `exec` preserves the child exit code unless interrupted by protection loss | Proceed with the workflow |
-| `75` | Local physical input detected or Broker is in `awaitingManualUnlock`; screen is relocked | Stop the task and return local control without prompting the user to relock |
+| `75` | Local physical input detected or Broker is in cooldown / `awaitingManualUnlock`; screen is relocked | Stop the task and return local control without prompting the user to relock |
 | `76` | Lease reached the 30s idle timeout or 300s maximum duration, or another caller ran `locked-use end` while this command was in flight | Start a new lease only if work remains |
 | `77` | Not installed, missing permissions, or `--require-locked` precondition unmet | Inspect `blockers` in `locked-use status --json` |
 | `64` | Invalid CLI arguments | Fix command invocation |
@@ -146,7 +147,7 @@ Native macOS applications (`YourApp.app`) can embed `LockedUseKit` in-process; t
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/nia-teams/macos-locked-use.git", from: "0.1.1")
+    .package(url: "https://github.com/nia-teams/macos-locked-use.git", from: "0.1.3")
 ],
 targets: [
     .target(
@@ -243,7 +244,15 @@ In the table below, `ROOT` denotes `/Library/Application Support/LockedUse`:
 
 ## Component Workflow
 
-When the Mac is locked, the host application (or `locked-use`) requests a lease from Broker and launches both `LockedUseGuardian` and an independent `Watchdog` process to cover every display. Once both guards report full coverage, Broker issues a single-use 5-second permit and Guardian wakes the display to trigger lock-screen authentication; `SecurityAgent` loads `LockedUseAuth.bundle` to consume that permit and complete unlock. When a lease is ended or reaches its 30-second idle / 300-second maximum limit, the Mac relocks and Broker returns to `idle`. If either guard disconnects or physical input is detected during a lease, the screen relocks and Broker enters `awaitingManualUnlock`; once the user unlocks the Mac normally with password or Touch ID, Broker observes the unlocked console session for the same UID and `auditSessionID` and resets to `idle`.
+When the Mac is locked, the host application (or `locked-use`) requests a lease from Broker and launches both `LockedUseGuardian` and an independent `Watchdog` process to cover every display. Once both guards report full coverage, Broker issues a single-use 5-second permit and Guardian wakes the display to trigger lock-screen authentication; `SecurityAgent` loads `LockedUseAuth.bundle` to consume that permit and complete unlock. When a lease is ended or reaches its 30-second idle / 300-second maximum limit, the Mac relocks and Broker returns to `idle`. If either guard disconnects or physical input is detected during a lease, the screen relocks and Broker enters `awaitingManualUnlock`. After full dual-guard release with no issued permit, the configured cooldown resets Broker to `idle` (default 60s; `manual` disables expiry). A normal password or Touch ID unlock observed for the same UID and `auditSessionID` resets immediately after release.
+
+### Interruption Recovery
+
+`locked-use enable --cooldown <seconds|manual>` configures recovery: omit the option for **60 seconds**, choose a finite duration greater than zero and at most **86400 seconds**, or use `manual` to require a normal password/Touch ID unlock. `LockedUseSettings.handle(arguments:)` accepts the same arguments.
+
+An interrupted call relocks the screen and exits **75**; the caller stops the current task and yields to local activity. Broker retains the wire phase `awaitingManualUnlock` during recovery and rejects new leases with exit 75. Cooldown starts after both Guardian and Watchdog release and no permit remains. Cooldown expiry returns Broker to `idle` and removes `lease-recovery.json`; a matching console manual unlock resets after guard release. Unshielded validation diagnostics remain manual-only.
+
+`status --json` exposes optional `awaitingManualUnlock`, `cooldownRemainingSeconds` (integer seconds rounded up), and `cooldownConfiguredSeconds`, plus `blockers`. `cooldownRemainingSeconds` is omitted while guards release or in manual-only mode. Configuration schema 1 adds `cooldownSeconds`: missing means 60; JSON `null` means manual-only. Recovery records persist a bounded cooldown budget rather than countdown ticks; restarting resumes that budget at the first monotonic receipt, capped by the active configuration.
 
 ## Security and Risks
 

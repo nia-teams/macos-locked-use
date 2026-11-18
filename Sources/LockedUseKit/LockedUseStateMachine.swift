@@ -298,6 +298,13 @@ public struct LockedUseStateMachine: Sendable {
         lastEventAt = now
     }
 
+    /// The coordinator owns the dual-guard/permit barrier and cooldown policy.
+    public mutating func completeCooldown(now: TimeInterval) throws {
+        try checkClock(now)
+        guard phase == .awaitingManualUnlock else { return }
+        reset()
+    }
+
     private mutating func reset() {
         phase = .idle
         owner = nil

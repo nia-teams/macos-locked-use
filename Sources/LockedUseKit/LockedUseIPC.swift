@@ -50,14 +50,16 @@ public struct LockedUseIPCReply: Codable, Sendable {
     public let startupDeadline: TimeInterval?
     public let stopReason: LockedUseStateMachine.StopReason?
     public let validationConfirmation: Bool?
+    public let cooldownRemainingSeconds: TimeInterval?
 
     public init(id: UUID, result: Result, phase: LockedUseStateMachine.Phase,
-                leaseID: UUID? = nil, token: Data? = nil, effects: [String] = [], detail: String? = nil, guardsReleased: Bool? = nil, recoveryProbePrepared: Bool? = nil, startupDeadline: TimeInterval? = nil, validationConfirmation: Bool? = nil, stopReason: LockedUseStateMachine.StopReason? = nil) {
+                leaseID: UUID? = nil, token: Data? = nil, effects: [String] = [], detail: String? = nil, guardsReleased: Bool? = nil, recoveryProbePrepared: Bool? = nil, startupDeadline: TimeInterval? = nil, validationConfirmation: Bool? = nil, stopReason: LockedUseStateMachine.StopReason? = nil, cooldownRemainingSeconds: TimeInterval? = nil) {
         version = 1; self.id = id; self.result = result; self.phase = phase
         self.leaseID = leaseID; self.token = token; self.effects = effects; self.detail = detail
         self.guardsReleased = guardsReleased
         self.recoveryProbePrepared = recoveryProbePrepared
         self.startupDeadline = startupDeadline
+        self.cooldownRemainingSeconds = cooldownRemainingSeconds
         self.validationConfirmation = validationConfirmation
         self.stopReason = stopReason
     }

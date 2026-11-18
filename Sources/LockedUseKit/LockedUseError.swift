@@ -20,7 +20,7 @@ public enum LockedUseError: Error, LocalizedError, Equatable {
         case .message(let message), .stateUnavailable(let message), .usage(let message): return message
         case .stopped(let reason, let manual):
             return manual || reason?.requiresManualUnlock == true
-                ? "Locked Use stopped (\(reason?.rawValue ?? "awaitingManualUnlock")); yield to the human and unlock the Mac normally."
+                ? "Locked Use stopped (\(reason?.rawValue ?? "awaitingManualUnlock")); yield to local activity and wait for cooldown recovery or unlock the Mac normally."
                 : "Locked Use lease stopped (\(reason?.rawValue ?? "relocked"))."
         }
     }
