@@ -185,8 +185,8 @@ public struct LockedUseDiagnostics: Codable, Sendable {
             session: currentSession, protectedSessionActive: protectedSession,
             accessibility: AXIsProcessTrusted(),
             screenRecording: CGPreflightScreenCaptureAccess(), inputMonitoring: CGPreflightListenEventAccess(),
-            installedPluginVersion: Bundle(url: URL(fileURLWithPath: pluginsPath + "/" + ownPlugin))?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-            bundledPluginVersion: Bundle(url: LockedUseHost.currentBundle.bundleURL.appendingPathComponent("Contents/Resources/LockedUse/LockedUseAuth.bundle"))?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            installedPluginVersion: bundleShortVersionString(at: URL(fileURLWithPath: pluginsPath + "/" + ownPlugin)),
+            bundledPluginVersion: bundleShortVersionString(at: LockedUseHost.currentBundle.bundleURL.appendingPathComponent("Contents/Resources/LockedUse/LockedUseAuth.bundle")),
             pluginInstalled: entries.contains(ownPlugin),
             brokerInstalled: FileManager.default.fileExists(atPath: "/Library/Application Support/LockedUse/LockedUseService"),
             guardianAccessibility: guardianPermissions["accessibility"],
@@ -226,6 +226,26 @@ public struct LockedUseDiagnostics: Codable, Sendable {
                   let input = value["inputMonitoring"] as? Bool else { return [:] }
             return ["accessibility": accessibility, "inputMonitoring": input]
         } catch { return [:] }
+    }
+
+    /// NSBundle caches Info.plist by bundle path for the process lifetime. Components
+    /// can be replaced in place while this host stays open, so always read the disk.
+    static func bundleShortVersionString(at bundleURL: URL) -> String? {
+        let plistURL = bundleURL.appendingPathComponent("Contents/Info.plist")
+        let maxBytes = 1_048_576
+        // A nonblocking open without symlink traversal rejects FIFOs and symlinks. Check
+        // the opened descriptor, not the path, so replacement cannot bypass the check.
+        let fd = open(plistURL.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(handle.fileDescriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              let data = try? handle.read(upToCount: maxBytes + 1),
+              data.count <= maxBytes,
+              let dictionary = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] else { return nil }
+        return dictionary["CFBundleShortVersionString"] as? String
     }
 
     public static func versionAdvice(installed: String?, bundled: String?) -> String? {
