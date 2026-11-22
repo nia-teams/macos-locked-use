@@ -104,7 +104,9 @@ final class DisplayGuardian: NSObject {
                 guard hello.result != .denied, let token = hello.token else { throw GuardianError.message("Broker rejected Guardian identity/challenge") }
                 validationConfirmation = hello.validationConfirmation == true
                 let clickTag = Int64.random(in: 1...Int64.max)
-                clickAllowance = .init(tag: clickTag, sender: getpid(), now: ProcessInfo.processInfo.systemUptime)
+                let clickNow = ProcessInfo.processInfo.systemUptime
+                clickAllowance = .init(tag: clickTag, sender: getpid(), now: clickNow,
+                    lifetime: LockedUseClickAllowance.startupLifetime(now: clickNow, startupDeadline: bootstrap.startupDeadline))
                 let returnTag = validationConfirmation ? Int64.random(in: 1...Int64.max) : nil
                 if let returnTag { returnAllowance = .init(tag: returnTag, sender: getpid(), session: policy.session, now: ProcessInfo.processInfo.systemUptime) }
                 watchdogBootstrap = try .init(leaseID: bootstrap.leaseID, token: token, clickTag: clickTag, returnTag: returnTag,
