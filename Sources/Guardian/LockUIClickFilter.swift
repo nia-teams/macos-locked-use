@@ -25,14 +25,20 @@ extension LockedUseClickAllowance {
         guard event.flags.intersection(modifiers).isEmpty else { return reject("flags") }
         guard event.getIntegerValueField(.mouseEventWindowUnderMousePointer) ==
                 event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) else { return reject("window") }
+        let session = LockedUseSession.current()
         let accepted = accept(button: type == .leftMouseDown ? .down : .up,
             tag: event.getIntegerValueField(.eventSourceUserData),
             sender: Int32(clamping: event.getIntegerValueField(.eventSourceUnixProcessID)),
             target: Int32(clamping: event.getIntegerValueField(.eventTargetUnixProcessID)),
             window: event.getIntegerValueField(.mouseEventWindowUnderMousePointer),
             x: event.location.x, y: event.location.y,
-            now: ProcessInfo.processInfo.systemUptime, locked: LockedUseSession.current().state == .locked)
-        return accepted ? true : reject(rejection?.rawValue ?? "inactive")
+            now: ProcessInfo.processInfo.systemUptime, locked: session.state == .locked)
+        if accepted { return true }
+        let reason = rejection?.rawValue ?? "inactive"
+        let observed = session.state.rawValue
+        let window = windowDiagnostics(now: ProcessInfo.processInfo.systemUptime)
+        logger.notice("clickRejected filter=\(filter, privacy: .public) reason=\(reason, privacy: .public) session=\(observed, privacy: .public) window=\(window, privacy: .public)")
+        return false
     }
 }
 

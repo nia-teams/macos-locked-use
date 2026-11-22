@@ -99,7 +99,7 @@ public struct LockedUseStateMachine: Sendable {
 
     public static let idleTimeout: TimeInterval = 30
     public static let permitLifetime: TimeInterval = 5
-    public static let unlockTimeout: TimeInterval = 8
+    public static let unlockTimeout: TimeInterval = 20
     public static let validationUnlockTimeout: TimeInterval = 20
     private let startupTimeout: TimeInterval
     public var startupDeadline: TimeInterval? {

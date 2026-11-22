@@ -18,6 +18,10 @@ public struct LockedUseClickAllowance: Sendable {
         revoked = tag == 0 || sender <= 0 || !now.isFinite
     }
     public mutating func revoke() { revoked = true; down = nil }
+    /// Diagnostics only: exposes the acceptance window for log correlation.
+    public func windowDiagnostics(now: TimeInterval) -> String {
+        "start=\(began) end=\(deadline) now=\(now) revoked=\(revoked)"
+    }
     public mutating func accept(button: Button, tag candidate: Int64, sender candidateSender: Int32,
         target: Int32, window: Int64, x: Double, y: Double, now: TimeInterval, locked: Bool) -> Bool {
         rejection = nil

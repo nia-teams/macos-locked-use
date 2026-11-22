@@ -353,7 +353,10 @@ final class DisplayGuardian: NSObject {
                     preparationLogger.notice("preparing elapsedMilliseconds=\(Int((now - self.started) * 1000), privacy: .public) watchdogReady=\(self.watchdogReady, privacy: .public) coverage=\(failure, privacy: .public)")
                 }
                 // Initial AppKit drawing and child launch can take a few frames.
-                if now - started >= 3.5 {
+                // The first shield window on a large display can also stall the
+                // main loop in compositor warm-up; keep a bounded but realistic
+                // budget so the guard reports ready instead of self-aborting.
+                if now - started >= 12.0 {
                     emit("preparationFailed", details: ["coverageFailure": shields.coverageFailure() ?? "",
                         "watchdogReady": watchdogReady, "watchdogRunning": watchdog?.isRunning == true,
                         "watchdogPipeFailed": watchdogReader?.failed ?? true])

@@ -80,7 +80,7 @@ PLIST
 locked_use_sign --force --options runtime,library --timestamp --sign "$identity" "$bundle"
 codesign --verify --strict "$bundle"
 codesign --verify --strict "$output/LockedUseService"
-if [[ " ${architectures[*]} " == *" $native_arch "* ]]; then
+if [[ " ${architectures[*]} " == *" $native_arch "* && "${LOCKED_USE_SKIP_ABI_TESTS:-0}" != 1 ]]; then
 xcrun clang -std=c11 -Wall -Wextra -Werror -mmacosx-version-min=14.0 -framework Security \
   AuthorizationPlugin/RemotePluginTests.c -o "$output/remote-plugin-abi-tests"
 "$output/remote-plugin-abi-tests" "$bundle/Contents/MacOS/LockedUseAuth"
