@@ -48,15 +48,20 @@ final class WatchdogBrokerLink: @unchecked Sendable {
                 let recovery = try candidate.request(.init(operation: .watchdogRecoveryHello, leaseID: bootstrap.leaseID,
                     session: .current(), hasObservedUnlock: observed))
                 if recovery.result == .denied {
-                    // Before our first registration, recovery denial is expected.
-                    // A previously registered process can never reuse its token.
+                    // A registered Watchdog cannot reuse its token. A new one
+                    // gets one registration attempt with the issued challenge.
+                    let leaseDenied: Bool
                     if hasRegisteredOnce {
+                        leaseDenied = true
+                    } else {
+                        let hello = try candidate.request(.init(operation: .watchdogHello, leaseID: bootstrap.leaseID, token: bootstrap.token))
+                        leaseDenied = hello.result == .denied
+                    }
+                    if leaseDenied {
                         candidate.close()
                         mutex.lock(); release = .deniedLease; mutex.unlock()
                         return
                     }
-                    let hello = try candidate.request(.init(operation: .watchdogHello, leaseID: bootstrap.leaseID, token: bootstrap.token))
-                    guard hello.result != .denied else { candidate.close(); throw GuardianError.message("Watchdog registration denied") }
                 }
                 hasRegisteredOnce = true
                 client = candidate

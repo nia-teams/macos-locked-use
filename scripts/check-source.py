@@ -276,8 +276,13 @@ class SourceTests(unittest.TestCase):
         self.assertIn("return [.releaseShield]", denied)
         self.assertNotIn(".requestRelock", denied)
         watchdog = read("Sources/Guardian/WatchdogBrokerLink.swift")
-        for token in ['recovery.effects.contains("releaseWatchdog")', "if hasRegisteredOnce", "release = .deniedLease", "systemUptime >= nextRetry"]:
+        for token in ['recovery.effects.contains("releaseWatchdog")', "systemUptime >= nextRetry"]:
             self.assertIn(token, watchdog)
+        denial = watchdog.split("if recovery.result == .denied", 1)[1].split("hasRegisteredOnce = true", 1)[0]
+        self.assertRegex(denial, r"if hasRegisteredOnce \{\s+leaseDenied = true\s+\} else \{")
+        self.assertIn("operation: .watchdogHello, leaseID: bootstrap.leaseID, token: bootstrap.token", denial)
+        self.assertIn("leaseDenied = hello.result == .denied", denial)
+        self.assertRegex(denial, r"if leaseDenied \{\s+candidate\.close\(\)\s+mutex\.lock\(\); release = \.deniedLease; mutex\.unlock\(\)\s+return")
         main = read("Sources/Guardian/GuardianMain.swift")
         self.assertLess(main.index("if brokerRelease == .deniedLease"), main.index("let presentationReady = lockPresentation.ready"))
 
