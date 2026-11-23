@@ -276,3 +276,16 @@ python3 scripts/check-source.py
 ## License
 
 [MIT](./LICENSE). Refactored from the Locked Use module of [open-computer-use](https://github.com/iFurySt/open-computer-use).
+
+## Shield bounds protection (component 0.1.4)
+
+Both Guardian and Watchdog pin independent shield windows to their assigned
+screens across application activation and Space changes. Bounds drift triggers
+re-anchoring and at most 200 ms of synchronous WindowServer verification; only
+observed full coverage is healthy. Persistent drift or missing/invalid shields
+still relock and enter configured recovery. Display topology changes replace
+coverage but deliberately end the current lease fail-closed.
+
+Existing root-installed 0.1.3 helpers require administrator-authorized component
+update; updating only the host app does not replace them. This source snapshot
+uses component version 0.1.4; it does not imply an upstream 0.1.4 tag is published.

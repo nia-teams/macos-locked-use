@@ -276,3 +276,13 @@ python3 scripts/check-source.py
 ## 许可证
 
 [MIT](./LICENSE)。基于 [open-computer-use](https://github.com/iFurySt/open-computer-use) 的 Locked Use 模块重构。
+
+## 遮罩边界保护（组件 0.1.4）
+
+Guardian 与 Watchdog 分别持有独立遮罩，并在应用激活和 Space 切换时固定到各自屏幕。
+边界偏移会触发重新锚定及最多 200 毫秒的同步 WindowServer 验证；只有实际观测到完整
+覆盖才算健康。持续偏移、遮罩缺失或无效仍会重新锁屏并进入既有恢复流程。真实显示拓扑
+变化会重建覆盖，但当前租约仍以 fail-closed 方式终止。
+
+已安装在系统目录的 0.1.3 组件需要管理员授权更新；只更新宿主 App 不会替换组件。
+本地源码快照组件版本为 0.1.4，不代表上游已发布 0.1.4 标签。

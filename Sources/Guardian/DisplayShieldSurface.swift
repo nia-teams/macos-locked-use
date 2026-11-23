@@ -3,23 +3,64 @@ import Foundation
 import IOKit.pwr_mgt
 import LockedUseKit
 
+@MainActor
 private final class ShieldWindow: NSPanel {
+    private var pinnedFrame: NSRect?
+
+    func pin(to frame: NSRect, force: Bool = false) {
+        pinnedFrame = frame
+        if force || self.frame != frame { setFrame(frame, display: true) }
+        orderFrontRegardless()
+        displayIfNeeded()
+    }
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(pinnedFrame ?? frameRect, display: flag)
+    }
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
     // AppKit may constrain ordinary windows to the menu/Dock visible frame
     // after finishLaunching. A privacy surface must cover the full display.
-    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { pinnedFrame ?? frameRect }
 }
 
 /// Shared visual surface for both the isolated preview and guarded rehearsal.
 @MainActor
-final class DisplayShieldSurface {
+final class DisplayShieldSurface: NSObject {
     private var windows: [CGDirectDisplayID: ShieldWindow] = [:]
     private var appearances: [CGDirectDisplayID: ShieldAppearance] = [:]
     private var topology = ""
+    private var message = ""
+    private var levelOffset = 0
+    private var reanchoring = false
     var count: Int { windows.count }
 
+    override init() {
+        super.init()
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification,
+                     NSWindow.didChangeScreenNotification, NSApplication.didChangeScreenParametersNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(surfaceChanged(_:)), name: name, object: nil)
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(surfaceChanged(_:)),
+            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+    }
+
+    @objc private func surfaceChanged(_ notification: Notification) {
+        if let window = notification.object as? NSWindow,
+           !windows.values.contains(where: { $0 === window }) { return }
+        reanchor()
+    }
+
+    private func reanchor(force: Bool = false) {
+        guard !reanchoring else { return }
+        reanchoring = true
+        defer { reanchoring = false }
+        for (id, screen) in screenIDs() {
+            windows[id]?.pin(to: LockedUseShieldCoverage.surfaceFrame(for: screen.frame), force: force)
+        }
+    }
+
     func updateMessage(_ message: String) {
+        self.message = message
         for (id, appearance) in appearances {
             appearance.updateMessage(message)
             windows[id]?.displayIfNeeded()
@@ -33,6 +74,8 @@ final class DisplayShieldSurface {
     }
 
     func close() {
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         for window in windows.values { window.close() }
         windows.removeAll()
         appearances.removeAll()
@@ -77,8 +120,17 @@ final class DisplayShieldSurface {
 
     func coverDisplays(message: String, levelOffset: Int = 0) throws {
         guard Self.ensureDisplayAwake() else { throw GuardianError.message("No active display after wake timeout") }
+        self.message = message
+        self.levelOffset = levelOffset
+        try reconcileScreens()
+    }
+
+    private func reconcileScreens() throws {
         let screens = screenIDs()
         guard !screens.isEmpty else { throw GuardianError.message("No display available") }
+        let oldWindows = windows
+        windows.removeAll()
+        appearances.removeAll()
         topology = displayTopology()
         for (id, screen) in screens {
             // `NSWindow(contentRect:screen:)` positions contentRect relative to
@@ -112,11 +164,12 @@ final class DisplayShieldSurface {
             window.isReleasedWhenClosed = false
             let appearance = ShieldAppearance(frame: NSRect(origin: .zero, size: frame.size), screen: screen, message: message)
             window.contentView = appearance
-            window.orderFrontRegardless()
-            window.displayIfNeeded()
+            window.pin(to: frame)
             windows[id] = window
             appearances[id] = appearance
         }
+        // Publish replacements before releasing any old opaque coverage.
+        for window in oldWindows.values { window.close() }
     }
 
     /// WindowServer evidence, not just `isVisible`. Other secure/system overlays
@@ -125,6 +178,19 @@ final class DisplayShieldSurface {
     func coverageHealthy() -> Bool { coverageFailure() == nil }
 
     func coverageFailure() -> String? {
+        if displayTopology() != topology {
+            // Cover the new topology, but never carry an existing lease across
+            // a real display change: Guardian policy/Broker must still relock.
+            try? reconcileScreens()
+            return "topologyChanged"
+        }
+        reanchor() // Polling recovers even if an AppKit notification was missed.
+        return LockedUseShieldRepair.verify(check: { self.rawCoverageFailure() },
+            repair: { self.reanchor(force: true) }, now: { ProcessInfo.processInfo.systemUptime },
+            wait: { Thread.sleep(forTimeInterval: $0) })
+    }
+
+    private func rawCoverageFailure() -> String? {
         guard displayTopology() == topology else { return "topologyChanged" }
         var count: UInt32 = 0
         guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0, count <= 64 else { return "activeDisplayCountUnavailable" }
@@ -135,6 +201,7 @@ final class DisplayShieldSurface {
             guard windows[id] != nil || (mirrored != kCGNullDirectDisplay && windows[mirrored] != nil) else { return "activeDisplayUncovered" }
         }
         guard let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return "windowListUnavailable" }
+        var boundsFailure: String?
         for (id, window) in windows {
             guard window.isVisible else { return "shieldNotVisible" }
             guard let info = infos.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == window.windowNumber }) else { return "shieldNotInWindowServer" }
@@ -143,9 +210,12 @@ final class DisplayShieldSurface {
             guard (info[kCGWindowLayer as String] as? NSNumber)?.intValue == window.level.rawValue else { return "shieldLayerMismatch" }
             guard let bounds = info[kCGWindowBounds as String] as? [String: Any],
                   let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return "shieldBoundsUnavailable" }
-            guard LockedUseShieldCoverage.covers(rect, display: CGDisplayBounds(id)) else { return "shieldBoundsMismatch expected=\(NSStringFromRect(CGDisplayBounds(id))) actual=\(NSStringFromRect(rect))" }
+            if !LockedUseShieldCoverage.covers(rect, display: CGDisplayBounds(id)), boundsFailure == nil {
+                boundsFailure = "shieldBoundsMismatch expected=\(NSStringFromRect(CGDisplayBounds(id))) actual=\(NSStringFromRect(rect)) displayID=\(id) window=\(window.windowNumber) cocoaFrame=\(NSStringFromRect(window.frame))"
+            }
         }
-        return nil
+        // Validate integrity of EVERY shield before considering bounds repair.
+        return boundsFailure
     }
 
 }

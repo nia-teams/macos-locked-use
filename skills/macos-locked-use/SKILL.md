@@ -38,3 +38,16 @@ Recovery policy: `locked-use enable --cooldown <seconds|manual>` accepts finite 
 For CLI / Node.js integration or in-process Swift integration (`LockedUseKit` + bundling the 4 signed helper components under `Contents/Resources/LockedUse/`), see `README.md` and `Sources/LockedUseKit/LockedUseGUI.swift`.
 
 Staging preserves signed versioned-framework links within `Client.app`. `LockedUseStagedTree.validate` rejects links in helpers or the app root, escaping/absolute/dangling/cyclic links, unsafe ownership/modes/ACLs, and untrusted ancestors; it does not replace code-signature verification. Permission normalization never dereferences staged symlinks.
+
+## Shield bounds protection (component 0.1.4)
+
+Both Guardian and Watchdog pin independent shield windows to their assigned
+screens across application activation and Space changes. Bounds drift triggers
+re-anchoring and at most 200 ms of synchronous WindowServer verification; only
+observed full coverage is healthy. Persistent drift or missing/invalid shields
+still relock and enter configured recovery. Display topology changes replace
+coverage but deliberately end the current lease fail-closed.
+
+Existing root-installed 0.1.3 helpers require administrator-authorized component
+update; updating only the host app does not replace them. This source snapshot
+uses component version 0.1.4; it does not imply an upstream 0.1.4 tag is published.

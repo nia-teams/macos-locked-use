@@ -277,8 +277,9 @@ enum GuardianError: Error { case message(String) }
         let current = LockedUseSession.current()
         shield?.updateStatus(now: now, session: current, stopping: stopping)
         let same = current.userID == initial.userID && current.auditSessionID == initial.auditSessionID
-        let protected = shield?.healthy ?? true
-        if !protected { stop(shield?.healthFailure ?? "protectionUnavailable") }
+        let healthFailure = shield?.healthFailure
+        let protected = healthFailure == nil
+        if let healthFailure { stop(healthFailure) }
         brokerLink?.observe(current, protected: protected, stopping: stopping)
         if brokerLink?.ready == true { _ = HeartbeatPipe.send(82, to: STDOUT_FILENO) }
         releaseSignalSeen = releaseSignalSeen || bytes.contains(76) || brokerLink?.releaseRequested == true

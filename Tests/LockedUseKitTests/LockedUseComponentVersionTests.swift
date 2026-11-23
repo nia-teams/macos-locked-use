@@ -17,16 +17,16 @@ final class LockedUseComponentVersionTests: XCTestCase {
             let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
             try data.write(to: plistURL, options: .atomic)
         }
-        try writeVersion("0.1.2")
-        let cachedBundle = try XCTUnwrap(Bundle(url: bundleURL))
-        XCTAssertEqual(cachedBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.1.2")
-        XCTAssertEqual(LockedUseDiagnostics.bundleShortVersionString(at: bundleURL), "0.1.2")
-
         try writeVersion("0.1.3")
-        // Same bundle path and process: neither reopening UI nor NSBundle refreshes this cache.
-        XCTAssertEqual(cachedBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.1.2")
-        XCTAssertEqual(Bundle(url: bundleURL)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.1.2")
+        let cachedBundle = try XCTUnwrap(Bundle(url: bundleURL))
+        XCTAssertEqual(cachedBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.1.3")
         XCTAssertEqual(LockedUseDiagnostics.bundleShortVersionString(at: bundleURL), "0.1.3")
+
+        try writeVersion("0.1.4")
+        // Same bundle path and process: neither reopening UI nor NSBundle refreshes this cache.
+        XCTAssertEqual(cachedBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.1.3")
+        XCTAssertEqual(Bundle(url: bundleURL)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, "0.1.3")
+        XCTAssertEqual(LockedUseDiagnostics.bundleShortVersionString(at: bundleURL), "0.1.4")
     }
 
     func testVersionReadRejectsMissingMalformedOversizedAndNonStringPlists() throws {
@@ -51,7 +51,7 @@ final class LockedUseComponentVersionTests: XCTestCase {
         XCTAssertNil(LockedUseDiagnostics.bundleShortVersionString(at: bundleURL))
         try FileManager.default.removeItem(at: plistURL)
         let targetURL = bundleURL.appendingPathComponent("Contents/RealInfo.plist")
-        let data = try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "0.1.3"], format: .xml, options: 0)
+        let data = try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "0.1.4"], format: .xml, options: 0)
         try data.write(to: targetURL, options: .atomic)
         try FileManager.default.createSymbolicLink(at: plistURL, withDestinationURL: targetURL)
         XCTAssertNil(LockedUseDiagnostics.bundleShortVersionString(at: bundleURL))

@@ -14,6 +14,37 @@ def read(name):
 
 
 class SourceTests(unittest.TestCase):
+    def test_shield_pinning_and_verified_bounded_repair(self):
+        surface = read("Sources/Guardian/DisplayShieldSurface.swift")
+        for token in ["private var pinnedFrame: NSRect?", "pinnedFrame ?? frameRect",
+                      "super.setFrame(pinnedFrame ?? frameRect, display: flag)",
+                      "NSWindow.didMoveNotification", "NSWindow.didResizeNotification",
+                      "NSWindow.didChangeScreenNotification", "NSWorkspace.activeSpaceDidChangeNotification",
+                      "NSApplication.didChangeScreenParametersNotification", "guard !reanchoring",
+                      "self.reanchor(force: true)", "LockedUseShieldRepair.verify",
+                      "[.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]",
+                      "LockedUseShieldCoverage.screenLocalRect", "CGDisplayBounds(id)",
+                      "window.windowNumber", "getpid()", "try? reconcileScreens()"]:
+            self.assertIn(token, surface)
+        self.assertLess(surface.index("window.contentView = appearance"), surface.index("window.pin(to: frame)"))
+        self.assertLess(surface.index("appearances[id] = appearance"), surface.index("for window in oldWindows.values"))
+        repair = read("Sources/LockedUseKit/LockedUseShieldRepair.swift")
+        for token in ["timeout: TimeInterval = 0.2", "interval: TimeInterval = 0.01",
+                      'failure.hasPrefix("shieldBoundsMismatch ")', "for _ in 0..<20",
+                      "after - started <= timeout", "guard let observed = check() else { return nil }"]:
+            self.assertIn(token, repair)
+        self.assertNotIn("RunLoop", repair)
+        self.assertIn("private let shields = DisplayShieldSurface()", read("Sources/Guardian/DisplayGuardian.swift"))
+        self.assertIn("private let surface = DisplayShieldSurface()", read("Sources/Guardian/WatchdogShield.swift"))
+        watchdog = read("Sources/Guardian/GuardianMain.swift")
+        self.assertIn("let healthFailure = shield?.healthFailure", watchdog)
+        self.assertIn("if let healthFailure { stop(healthFailure) }", watchdog)
+        tests = read("Tests/LockedUseKitTests/LockedUseShieldRepairTests.swift")
+        for token in ["width: 1512, height: 982", "x: -1921, y: -243, width: 2260, height: 1469",
+                      "testPersistentDisplacementFailsClosedWithinBudget", "testDisappearingShieldDuringRepairFailsImmediately",
+                      "testStalledInvalidAndOvershootingClocksCannotExtendBudget", "testPersistentMismatchRequestsRelock"]:
+            self.assertIn(token, tests)
+
     def test_manifest_is_standalone(self):
         manifest = read("Package.swift")
         self.assertIn("// swift-tools-version: 5.10", manifest)
@@ -105,7 +136,7 @@ class SourceTests(unittest.TestCase):
         self.assertNotIn('/bin/chmod -h -N', enable)
         self.assertNotIn('--noxattr', enable)
         self.assertNotIn('--norsrc', enable)
-        self.assertEqual(read("VERSION").strip(), "0.1.3")
+        self.assertEqual(read("VERSION").strip(), "0.1.4")
         tests = read("Tests/LockedUseKitTests/LockedUseStagedTreeTests.swift")
         for token in ["testVersionedFramework", "testHelperAndAppRoots", "testAbsoluteEscaping",
                       "testUnsafeModes", "testMutatingACLs", "testRegularFileRoot", "testTrailingSlashTargetsRequireDirectoriesAcrossChains"]:
