@@ -86,6 +86,34 @@ final class LockedUseShieldRepairTests: XCTestCase {
         XCTAssertEqual(state.failure(observed: nil, unlocked: true, now: 0.4), "topologyChanged")
     }
 
+    func testTopologyBaselineIsArmedBeforeFirstCandidateAndNeverRebased() throws {
+        var state = LockedUseShieldRepair()
+        state.observeTopology("initial") // coverDisplays arms before make starts.
+        let staged = try LockedUseShieldRepair.stage(ids: [1, 2], make: { id -> Int in
+            state.observeTopology(id == 1 ? "during-staging" : "initial")
+            return id
+        }, discard: { _ in XCTFail("Complete stage") })
+        XCTAssertEqual(staged.count, 2)
+        XCTAssertEqual(state.baselineTopology, "initial")
+        XCTAssertEqual(state.failure(observed: nil, unlocked: false, now: 0), "topologyChanged")
+        XCTAssertEqual(state.failure(observed: nil, unlocked: true, now: 1), "topologyChanged")
+        state = LockedUseShieldRepair() // close disarms; a later prepare is fresh.
+        XCTAssertNil(state.baselineTopology)
+        XCTAssertNil(state.latchedFailure)
+        state.observeTopology("later-prepare")
+        XCTAssertNil(state.failure(observed: nil, unlocked: false, now: 0))
+    }
+
+    func testSupplementalStagingNeverReplacesVerifiedEntries() throws {
+        var live = [1: "verified-original"]
+        let screens = [1, 2, 3]
+        let additions = screens.filter { live[$0] == nil }
+        let staged = try LockedUseShieldRepair.stage(ids: additions, make: { "supplement-\($0)" },
+            discard: { _ in XCTFail("Complete stage") })
+        for (id, candidate) in staged { live[id] = candidate }
+        XCTAssertEqual(live, [1: "verified-original", 2: "supplement-2", 3: "supplement-3"])
+    }
+
     func testEmptyStagingPreservesLiveWindowsAndLatchesFailure() {
         var state = prepared()
         var live = [1: "original"]

@@ -16,6 +16,19 @@ public enum LockedUseShieldCoverage {
         global.offsetBy(dx: -screenOrigin.x, dy: -screenOrigin.y)
     }
 
+    /// Prefer the active display's own shield; mirror metadata may select an
+    /// existing source shield, but can never stand in for geometry validation.
+    public static func coveringShieldID(activeID: UInt32, mirrorID: UInt32,
+                                        available: Set<UInt32>) -> UInt32? {
+        if available.contains(activeID) { return activeID }
+        if mirrorID != 0, available.contains(mirrorID) { return mirrorID }
+        return nil
+    }
+
+    public static func coversAssignedAndActive(_ surface: CGRect, assigned: CGRect, active: CGRect) -> Bool {
+        covers(surface, display: assigned) && covers(surface, display: active)
+    }
+
     public static func covers(_ surface: CGRect, display: CGRect) -> Bool {
         func valid(_ rect: CGRect) -> Bool {
             !rect.isNull && !rect.isInfinite && [rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,

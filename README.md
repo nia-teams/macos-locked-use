@@ -289,9 +289,11 @@ geometric coverage during the animation. Every shield must remain onscreen with
 our PID, valid bounds, alpha >= 0.99 and its required level throughout the window.
 Missing/invalid shields, topology changes and expired recovery fail closed.
 
-Topology failure is latched for the surface lifetime, including notification-first
-changes. Replacement windows are staged atomically; failed/empty staging retains
-existing windows. Reconciliation never makes the current lease healthy again.
+Topology observation arms before preparation creates any windows. A failed prepare
+closes its candidates and disarms the surface. After preparation, topology faults
+latch until teardown: verified windows are never replaced or closed mid-lease;
+only missing display IDs may receive supplemental shields. Both each shield's own
+display and every active/mirrored display require verified WindowServer coverage.
 Existing root-installed 0.1.3 helpers require administrator-authorized component
 update; updating only the host app does not replace them. This local component
 0.1.4 snapshot does not imply an upstream 0.1.4 tag is published.

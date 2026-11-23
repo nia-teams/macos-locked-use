@@ -32,34 +32,56 @@ class SourceTests(unittest.TestCase):
         repair = read("Sources/LockedUseKit/LockedUseShieldRepair.swift")
         for token in ["timeout: TimeInterval = 1.2", "mismatchStarted", "verifiedCoverage",
                       "guard unlocked, verifiedCoverage", "now - mismatchStarted >= Self.timeout",
-                      "if latchedFailure == nil", "initialTopology", 'latch("topologyChanged")']:
+                      "if latchedFailure == nil", "baselineTopology", 'latch("topologyChanged")']:
             self.assertIn(token, repair)
         self.assertNotIn("Thread.sleep", repair)
         self.assertIn("shields.observeUnlockedSession()", read("Sources/Guardian/DisplayGuardian.swift"))
         self.assertIn("surface.observeUnlockedSession()", read("Sources/Guardian/WatchdogShield.swift"))
         self.assertIn("let healthFailure = shield?.healthFailure", read("Sources/Guardian/GuardianMain.swift"))
 
-    def test_topology_is_latched_before_atomic_staging_and_never_swallowed(self):
+    def test_topology_is_armed_before_staging_and_old_shields_are_never_replaced(self):
         surface = read("Sources/Guardian/DisplayShieldSurface.swift")
         notification = surface[surface.index("    @objc private func surfaceChanged"):surface.index("    func observeUnlockedSession")]
-        self.assertIn("reconcileTopologyIfNeeded()", notification)
-        reconcile = surface[surface.index("    private func reconcileTopologyIfNeeded"):surface.index("    private func reanchor")]
-        self.assertLess(reconcile.index("recovery.observeTopology(current)"), reconcile.index("try reconcileScreens()"))
-        self.assertIn('catch { recovery.latch("shieldReconciliationFailed") }', reconcile)
-        staging = surface[surface.index("    private func reconcileScreens()"):surface.index("    func coverageHealthy()")]
-        self.assertNotIn("windows.removeAll()", staging)
-        self.assertNotIn("appearances.removeAll()", staging)
-        self.assertLess(staging.index("LockedUseShieldRepair.stage"), staging.index("windows = staged.mapValues"))
-        self.assertLess(staging.index("appearances = staged.mapValues"), staging.index("for window in oldWindows.values"))
-        health = surface[surface.index("    func coverageFailure()"):surface.index("    private func rawCoverageFailure()")]
-        self.assertIn("if let failure = recovery.latchedFailure { return failure }", health)
+        self.assertIn("observeTopologyAndSupplement()", notification)
+        supplement = surface[surface.index("    private func observeTopologyAndSupplement"):surface.index("    private func reanchor")]
+        self.assertLess(supplement.index("recovery.observeTopology("), supplement.index("!staging"))
+        self.assertIn("screens.filter { windows[$0.0] == nil }", supplement)
+        self.assertNotIn(".close()", supplement)
+        self.assertNotIn("removeAll()", supplement)
+        self.assertIn('catch { recovery.latch("shieldReconciliationFailed") }', supplement)
+        prepare = surface[surface.index("    func coverDisplays("):surface.index("    private func stageScreens")]
+        self.assertLess(prepare.index("recovery.observeTopology(displayTopology())"), prepare.index("Self.ensureDisplayAwake()"))
+        self.assertLess(prepare.index("recovery.observeTopology(displayTopology())"), prepare.index("try stageScreens("))
+        self.assertGreaterEqual(prepare.count("recovery.observeTopology(displayTopology())"), 2)
+        self.assertIn("unlocked: false", prepare)
+        self.assertIn("close() // Includes all published candidates", prepare)
+        close = surface[surface.index("    func close()"):surface.index("    private func screenIDs()")]
+        self.assertLess(close.index("recovery = LockedUseShieldRepair()"), close.index("window.close()"))
+        self.assertIn("observedUnlock = false", close)
         self.assertNotIn("try?", surface)
+
+    def test_every_active_and_mirrored_display_requires_verified_geometry(self):
+        surface = read("Sources/Guardian/DisplayShieldSurface.swift")
+        raw = surface[surface.index("    private func rawCoverageFailure()"):]
+        for token in ["var verifiedBounds:", "verifiedBounds[id] = rect", "for activeID in active.prefix(Int(count))",
+                      "LockedUseShieldCoverage.coveringShieldID", "CGDisplayMirrorsDisplay(activeID)",
+                      "let activeDisplay = CGDisplayBounds(activeID)", "let ownDisplay = CGDisplayBounds(shieldID)",
+                      "LockedUseShieldCoverage.coversAssignedAndActive", "count > 0, Int(count) <= active.count"]:
+            self.assertIn(token, raw)
+        self.assertLess(raw.index("verifiedBounds[id] = rect"), raw.index("for activeID in active.prefix"))
+        coverage = read("Sources/LockedUseKit/LockedUseShieldCoverage.swift")
+        self.assertIn("covers(surface, display: assigned) && covers(surface, display: active)", coverage)
+        tests = read("Tests/LockedUseKitTests/LockedUseShieldCoverageTests.swift")
+        self.assertIn("testMirroredDisplaySelectionDoesNotStandInForCoverage", tests)
+        self.assertIn("testActiveCoverageAlsoRequiresAssignedDisplayAndValidGeometry", tests)
 
     def test_space_recovery_and_atomic_staging_regressions_are_exercised(self):
         tests = read("Tests/LockedUseKitTests/LockedUseShieldRepairTests.swift")
         for token in ["width: 1512, height: 982", "x: -1921, y: -243, width: 2260, height: 1469",
                       "testReportedSpaceSlideSurvivesSixHundredMillisecondsAndResets",
                       "testTopologyNotificationBeforePollLatchesAcrossSuccessfulReconciliation",
+                      "testTopologyBaselineIsArmedBeforeFirstCandidateAndNeverRebased",
+                      "testSupplementalStagingNeverReplacesVerifiedEntries",
                       "testEmptyStagingPreservesLiveWindowsAndLatchesFailure",
                       "testFailedStagingClosesOnlyCandidatesAndPreservesLiveWindows",
                       "testPreparationAndUnverifiedSurfacesNeverGetGrace",
@@ -367,7 +389,10 @@ class SourceTests(unittest.TestCase):
 
     def test_display_wake_and_secondary_coordinates_are_wired(self):
         source = read("Sources/Guardian/DisplayShieldSurface.swift")
-        self.assertLess(source.index("guard Self.ensureDisplayAwake()"), source.index("let screens = screenIDs()"))
+        prepare = source[source.index("    func coverDisplays("):source.index("    private func stageScreens")]
+        # Baseline observation deliberately precedes wake; actual shield staging
+        # still waits for active displays to wake, before any window publication.
+        self.assertLess(prepare.index("guard Self.ensureDisplayAwake()"), prepare.index("try stageScreens(screenIDs())"))
         self.assertIn("IOPMAssertionDeclareUserActivity", source)
         self.assertIn("IOPMAssertionRelease", source)
         self.assertIn("contentRect: local", source)

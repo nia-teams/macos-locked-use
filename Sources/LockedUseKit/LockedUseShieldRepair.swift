@@ -6,17 +6,17 @@ public struct LockedUseShieldRepair: Sendable {
     public static let timeout: TimeInterval = 1.2
     public private(set) var latchedFailure: String?
     public private(set) var mismatchStarted: TimeInterval?
-    private var initialTopology: String?
+    public private(set) var baselineTopology: String?
     private var verifiedCoverage = false
     private var lastNow: TimeInterval?
 
     public init() {}
 
     public mutating func observeTopology(_ topology: String) {
-        if let initialTopology {
-            if topology != initialTopology { latch("topologyChanged") }
+        if let baselineTopology {
+            if topology != baselineTopology { latch("topologyChanged") }
         } else if !topology.isEmpty {
-            initialTopology = topology
+            baselineTopology = topology
         } else { latch("topologyUnavailable") }
     }
 

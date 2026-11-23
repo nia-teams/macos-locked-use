@@ -58,6 +58,38 @@ final class LockedUseShieldCoverageTests: XCTestCase {
         XCTAssertTrue(LockedUseShieldCoverage.covers(CGRect(x: -2400, y: -270, width: 2880, height: 1620), display: display))
     }
 
+    func testMirroredDisplaySelectionDoesNotStandInForCoverage() {
+        let source: UInt32 = 1
+        let mirror: UInt32 = 2
+        XCTAssertEqual(LockedUseShieldCoverage.coveringShieldID(activeID: mirror, mirrorID: source,
+            available: [source]), source)
+        XCTAssertEqual(LockedUseShieldCoverage.coveringShieldID(activeID: mirror, mirrorID: source,
+            available: [source, mirror]), mirror)
+        XCTAssertNil(LockedUseShieldCoverage.coveringShieldID(activeID: mirror, mirrorID: 0,
+            available: [source]))
+        XCTAssertNil(LockedUseShieldCoverage.coveringShieldID(activeID: mirror, mirrorID: 3,
+            available: [source]))
+        let assigned = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let actualMirror = CGRect(x: 0, y: 0, width: 2260, height: 1469)
+        XCTAssertTrue(LockedUseShieldCoverage.covers(assigned, display: assigned))
+        XCTAssertFalse(LockedUseShieldCoverage.coversAssignedAndActive(assigned,
+            assigned: assigned, active: actualMirror))
+        XCTAssertTrue(LockedUseShieldCoverage.coversAssignedAndActive(actualMirror,
+            assigned: assigned, active: actualMirror))
+    }
+
+    func testActiveCoverageAlsoRequiresAssignedDisplayAndValidGeometry() {
+        let own = CGRect(x: -1920, y: 0, width: 1920, height: 1080)
+        let active = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        XCTAssertFalse(LockedUseShieldCoverage.coversAssignedAndActive(active, assigned: own, active: active))
+        let spanning = own.union(active)
+        XCTAssertTrue(LockedUseShieldCoverage.coversAssignedAndActive(spanning, assigned: own, active: active))
+        for invalid in [CGRect.zero, .null, .infinite] {
+            XCTAssertFalse(LockedUseShieldCoverage.coversAssignedAndActive(spanning, assigned: invalid, active: active))
+            XCTAssertFalse(LockedUseShieldCoverage.coversAssignedAndActive(spanning, assigned: own, active: invalid))
+        }
+    }
+
     func testPrimaryScreenLocalRectIsUnchanged() {
         let global = LockedUseShieldCoverage.surfaceFrame(for: CGRect(x: 0, y: 0, width: 2557, height: 1653))
         XCTAssertEqual(LockedUseShieldCoverage.screenLocalRect(global, screenOrigin: .zero), global)
