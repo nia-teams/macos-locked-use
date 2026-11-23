@@ -152,6 +152,9 @@ private final class BrokerServer: @unchecked Sendable {
                 if let guardian = self.coordinator.recordedGuardian, kill(guardian.processID, 0) != 0, errno == ESRCH {
                     try self.coordinator.guardianProcessExited()
                 }
+                if let watchdog = self.coordinator.recordedWatchdog, kill(watchdog.processID, 0) != 0, errno == ESRCH {
+                    try self.coordinator.watchdogProcessExited()
+                }
                 if let owner = self.coordinator.recordedOwner, kill(owner.processID, 0) != 0, errno == ESRCH {
                     try self.coordinator.ownerProcessExited()
                 }

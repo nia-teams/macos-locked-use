@@ -4,6 +4,24 @@ import XCTest
 @testable import LockedUseKit
 
 final class StandaloneRegressionTests: XCTestCase {
+    func testDiagnosticsHideAvailabilityWhileShieldsReleaseInAnyPhase() {
+        let phases: [LockedUseStateMachine.Phase] = [.idle, .relocking, .awaitingManualUnlock]
+        for phase in phases {
+            let reply = LockedUseIPCReply(id: UUID(), result: .ok, phase: phase, guardsReleased: false)
+            let status = LockedUseDiagnostics.availabilityStatus(installationAvailable: true, reply: reply)
+            XCTAssertEqual(status.awaitingManualUnlock, phase == .awaitingManualUnlock)
+            XCTAssertFalse(status.available)
+            XCTAssertTrue(status.shieldsReleasing)
+            XCTAssertTrue(status.blockers.first?.contains("finishing shield release") == true)
+        }
+        let released = LockedUseIPCReply(id: UUID(), result: .waiting, phase: .awaitingManualUnlock,
+            guardsReleased: true, cooldownRemainingSeconds: 4.1)
+        let cooldown = LockedUseDiagnostics.availabilityStatus(installationAvailable: true, reply: released)
+        XCTAssertFalse(cooldown.available)
+        XCTAssertFalse(cooldown.shieldsReleasing)
+        XCTAssertTrue(cooldown.blockers.first?.contains("about 5s") == true)
+    }
+
     func testDisplayWakeWaitsForSleepingDisplaysAndPumpsUpdates() {
         var time: TimeInterval = 0
         var wakes = 0

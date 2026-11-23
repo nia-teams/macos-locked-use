@@ -182,7 +182,7 @@ class SourceTests(unittest.TestCase):
         self.assertNotIn('/bin/chmod -h -N', enable)
         self.assertNotIn('--noxattr', enable)
         self.assertNotIn('--norsrc', enable)
-        self.assertEqual(read("VERSION").strip(), "0.1.4")
+        self.assertEqual(read("VERSION").strip(), "0.1.5")
         tests = read("Tests/LockedUseKitTests/LockedUseStagedTreeTests.swift")
         for token in ["testVersionedFramework", "testHelperAndAppRoots", "testAbsoluteEscaping",
                       "testUnsafeModes", "testMutatingACLs", "testRegularFileRoot", "testTrailingSlashTargetsRequireDirectoriesAcrossChains"]:
@@ -242,11 +242,44 @@ class SourceTests(unittest.TestCase):
         self.assertIn("cooldownRemainingSeconds", read("Sources/LockedUseKit/LockedUseRecoveryRecord.swift"))
         self.assertIn("public let cooldownRemainingSeconds: TimeInterval?", read("Sources/LockedUseKit/LockedUseIPC.swift"))
         diagnostics = read("Sources/LockedUseKit/LockedUseDiagnostics.swift")
-        self.assertIn("reply.guardsReleased == false", diagnostics)
-        self.assertLess(diagnostics.index("if shieldsReleasing {"), diagnostics.index("else if let remaining = cooldownRemainingSeconds"))
-        for token in ["cooldownRemainingSeconds: Int?", "cooldownConfiguredSeconds: Int?", "awaitingManualUnlock: Bool?"]:
+        self.assertIn("reply?.guardsReleased == false", diagnostics)
+        self.assertLess(diagnostics.index("if shieldsReleasing {"), diagnostics.index("else if let remaining"))
+        for token in ["cooldownRemainingSeconds: Int?", "cooldownConfiguredSeconds: Int?", "awaitingManualUnlock: Bool?", "shieldsReleasing: Bool?"]:
             self.assertIn(token, diagnostics)
         self.assertTrue((ROOT / "Tests/LockedUseKitTests/LockedUseCooldownTests.swift").is_file())
+
+    def test_guard_release_is_replayed_and_process_exits_are_reaped(self):
+        coordinator = read("Sources/LockedUseKit/LockedUseBrokerCoordinator.swift")
+        for operation in ["guardianReport", "pluginFinished"]:
+            section = coordinator.split("case ." + operation + ":", 1)[1].split("        case .", 1)[0]
+            self.assertIn("let owner = stoppableOwner", section)
+        self.assertIn("[.idle, .relocking, .awaitingManualUnlock].contains(machine.phase) ? nil : machine.owner", coordinator)
+        reply = coordinator.split("private mutating func reply", 1)[1]
+        guardian = reply.split("if isGuardian(context)", 1)[1].split("if isWatchdog(context)", 1)[0]
+        self.assertIn('if effects.contains("releaseGuards") { releaseSent = true }', guardian)
+        self.assertIn('else if releaseSent { effects.append("releaseGuards") }', guardian)
+        self.assertIn('effects.contains("releaseGuards") ? .release', reply)
+        broker = read("Sources/Broker/BrokerMain.swift")
+        self.assertIn("kill(watchdog.processID, 0) != 0, errno == ESRCH", broker)
+        self.assertIn("try self.coordinator.watchdogProcessExited()", broker)
+
+    def test_guards_consume_recovery_effects_without_relocking_denied_leases(self):
+        guardian = read("Sources/Guardian/DisplayGuardian.swift")
+        for token in ["try handleBrokerEffects(hello.effects)", "try handleBrokerEffects(reply.effects)",
+                      'hello.effects.contains("releaseGuards")', "case .stopRequested: reason = nil",
+                      "requested: policy.phase == .relocking && policy.isQuiesced",
+                      "execute(policy.releaseForDeniedLease(), deniedLease: true)", "now >= nextBrokerRetry"]:
+            self.assertIn(token, guardian)
+        policy = read("Sources/LockedUseKit/LockedUseGuardianPolicy.swift")
+        denied = policy.split("func releaseForDeniedLease", 1)[1].split("public mutating func poll", 1)[0]
+        self.assertIn("phase = .finished", denied)
+        self.assertIn("return [.releaseShield]", denied)
+        self.assertNotIn(".requestRelock", denied)
+        watchdog = read("Sources/Guardian/WatchdogBrokerLink.swift")
+        for token in ['recovery.effects.contains("releaseWatchdog")', "if hasRegisteredOnce", "release = .deniedLease", "systemUptime >= nextRetry"]:
+            self.assertIn(token, watchdog)
+        main = read("Sources/Guardian/GuardianMain.swift")
+        self.assertLess(main.index("if brokerRelease == .deniedLease"), main.index("let presentationReady = lockPresentation.ready"))
 
     def test_structured_exec_stops_and_gui_dispatch(self):
         error = read("Sources/LockedUseKit/LockedUseError.swift")

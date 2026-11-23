@@ -27,6 +27,26 @@ final class LockedUseGuardianTests: XCTestCase {
         XCTAssertEqual(policy.stop(.localInput, now: 102), [])
     }
 
+    func testQuiescenceTracksDrainConfirmationAndInvalidation() throws {
+        var policy = try shielding()
+        XCTAssertFalse(policy.isQuiesced)
+        policy.confirmQuiescence()
+        XCTAssertTrue(policy.isQuiesced)
+        policy.requireQuiescence()
+        XCTAssertFalse(policy.isQuiesced)
+    }
+
+    func testDeniedLeaseReleasesWithoutLockObservationOrLocalRecoveryRequest() throws {
+        var policy = try shielding()
+        _ = policy.stop(.parentDisconnected, now: 100)
+        XCTAssertFalse(policy.localRecoveryReady)
+        XCTAssertEqual(policy.releaseForDeniedLease(), [.releaseShield])
+        XCTAssertEqual(policy.phase, .finished)
+        XCTAssertEqual(try policy.poll(session: unlocked, topology: "display-1", guardsHealthy: false, now: 101), [])
+        XCTAssertEqual(policy.stop(.guardianFailure, now: 102), [])
+        XCTAssertEqual(policy.releaseForDeniedLease(), [])
+    }
+
     func testExpiredHeartbeatCannotReviveGuardian() throws {
         var policy = try shielding()
         XCTAssertEqual(try policy.heartbeat(now: 101.5), [.requestRelock])

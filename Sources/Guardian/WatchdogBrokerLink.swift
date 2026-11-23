@@ -6,14 +6,19 @@ import os
 /// Root RPC runs on a separate queue. A wedged or restarting Broker cannot
 /// delay the watchdog's inherited-pipe heartbeat deadline or native relock.
 final class WatchdogBrokerLink: @unchecked Sendable {
+    enum Release: Equatable { case normal, deniedLease }
+
     private let logger = Logger(subsystem: "com.nia-teams.locked-use", category: "WatchdogBroker")
     private var reportedFailure = false
+    private var retryDelay: TimeInterval = 0
+    private var nextRetry: TimeInterval = 0
+    private var hasRegisteredOnce = false
     private let mutex = NSLock()
     private let bootstrap: LockedUseGuardianBootstrap
     private var client: LockedUseIPCClient?
     private var timer: DispatchSourceTimer?
     private var witnessedUnlock = false
-    private var release = false
+    private var release: Release?
     private var registered = false
     private var protected = false
     private var stopping = false
@@ -32,9 +37,10 @@ final class WatchdogBrokerLink: @unchecked Sendable {
         self.protected = protected; self.stopping = stopping
     }
     var ready: Bool { mutex.lock(); defer { mutex.unlock() }; return registered }
-    var releaseRequested: Bool { mutex.lock(); defer { mutex.unlock() }; return release }
+    var releaseRequested: Release? { mutex.lock(); defer { mutex.unlock() }; return release }
 
     private func report() {
+        guard ProcessInfo.processInfo.systemUptime >= nextRetry, releaseRequested != .deniedLease else { return }
         do {
             mutex.lock(); let observed = witnessedUnlock; let protected = protected; let stopping = stopping; mutex.unlock()
             if client == nil {
@@ -42,10 +48,22 @@ final class WatchdogBrokerLink: @unchecked Sendable {
                 let recovery = try candidate.request(.init(operation: .watchdogRecoveryHello, leaseID: bootstrap.leaseID,
                     session: .current(), hasObservedUnlock: observed))
                 if recovery.result == .denied {
+                    // Before our first registration, recovery denial is expected.
+                    // A previously registered process can never reuse its token.
+                    if hasRegisteredOnce {
+                        candidate.close()
+                        mutex.lock(); release = .deniedLease; mutex.unlock()
+                        return
+                    }
                     let hello = try candidate.request(.init(operation: .watchdogHello, leaseID: bootstrap.leaseID, token: bootstrap.token))
                     guard hello.result != .denied else { candidate.close(); throw GuardianError.message("Watchdog registration denied") }
                 }
+                hasRegisteredOnce = true
                 client = candidate
+                if recovery.effects.contains("releaseWatchdog") {
+                    mutex.lock(); release = .normal; mutex.unlock()
+                    return
+                }
                 logger.notice("registered")
             }
             let reply = try client!.request(.init(operation: .watchdogReport, leaseID: bootstrap.leaseID,
@@ -53,11 +71,16 @@ final class WatchdogBrokerLink: @unchecked Sendable {
                     watchdogHealthy: protected, displayGeneration: 1), stopReason: stopping ? .guardLost : nil,
                 hasObservedUnlock: observed))
             guard reply.result != .denied else { throw GuardianError.message("Watchdog report denied") }
-            mutex.lock(); registered = protected && !stopping; mutex.unlock()
-            if reply.effects.contains("releaseWatchdog") { mutex.lock(); release = true; mutex.unlock() }
+            retryDelay = 0; nextRetry = 0; reportedFailure = false
+            mutex.lock()
+            registered = protected && !stopping
+            if reply.effects.contains("releaseWatchdog") { release = .normal }
+            mutex.unlock()
         } catch {
             if !reportedFailure { logger.error("registrationOrReportFailed error=\(String(describing: error), privacy: .public)"); reportedFailure = true }
             client?.close(); client = nil
+            retryDelay = min(2, max(0.3, retryDelay * 2))
+            nextRetry = ProcessInfo.processInfo.systemUptime + retryDelay
             mutex.lock(); registered = false; mutex.unlock()
         }
     }
@@ -65,7 +88,8 @@ final class WatchdogBrokerLink: @unchecked Sendable {
         timer?.cancel(); timer = nil
         queue.sync {
             client?.close(); client = nil
-            mutex.lock(); let observed = witnessedUnlock; mutex.unlock()
+            mutex.lock(); let observed = witnessedUnlock; let denied = release == .deniedLease; mutex.unlock()
+            guard !denied else { return }
             _ = GuardReleaseAcknowledgement.send(bootstrap: bootstrap, watchdog: true, observedUnlock: observed)
         }
     }

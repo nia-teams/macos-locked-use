@@ -33,6 +33,8 @@ locked-use end
 
 Recovery policy: `locked-use enable --cooldown <seconds|manual>` accepts finite seconds greater than zero and at most 86400; `manual` requires normal unlock. `status --json` provides `awaitingManualUnlock`, `cooldownRemainingSeconds`, `cooldownConfiguredSeconds`, and actionable `blockers`. Missing remaining time may mean guards are still releasing or manual-only policy; use blockers rather than guessing. Exit 75 also applies to calls rejected during cooldown.
 
+In component 0.1.5, `shieldsReleasing: true` in `status --json` means the guards have not yet released, even if the Broker is already `idle`. Wait for release; this is not an installation repair or permission blocker.
+
 ## Host Integration
 
 For CLI / Node.js integration or in-process Swift integration (`LockedUseKit` + bundling the 4 signed helper components under `Contents/Resources/LockedUse/`), see `README.md` and `Sources/LockedUseKit/LockedUseGUI.swift`.

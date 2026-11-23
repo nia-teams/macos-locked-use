@@ -254,6 +254,8 @@ An interrupted call relocks the screen and exits **75**; the caller stops the cu
 
 `status --json` exposes optional `awaitingManualUnlock`, `cooldownRemainingSeconds` (integer seconds rounded up), and `cooldownConfiguredSeconds`, plus `blockers`. `cooldownRemainingSeconds` is omitted while guards release or in manual-only mode. Configuration schema 1 adds `cooldownSeconds`: missing means 60; JSON `null` means manual-only. Recovery records persist a bounded cooldown budget rather than countdown ticks; restarting resumes that budget at the first monotonic receipt, capped by the active configuration.
 
+In component 0.1.5, `status --json` reports `shieldsReleasing: true` when the Broker reports unreleased guards, even if its phase is already `idle`. Wait for release rather than reinstalling components. The Broker resends release instructions until acknowledged. When the verified Broker explicitly rejects a recovered lease, the guards release without relocking the console; a connection failure alone does not authorize release.
+
 ## Security and Risks
 
 - **Local process boundary**: Broker verifies connecting peers via kernel `LOCAL_PEERTOKEN` (signing identifier, Team ID, Hardened Runtime, and absence of `get-task-allow` or code-injection environment variables). Embedding `LockedUseKit` in-process inside a signed app without shipping the `locked-use` CLI prevents other local processes from borrowing its signature to unlock the screen. Deploying the standalone `locked-use` CLI allows any process running under the same logged-in macOS user to invoke `locked-use` and capture or interact with windows while the screen is locked.

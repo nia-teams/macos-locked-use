@@ -95,6 +95,89 @@ final class LockedUseBrokerCoordinatorTests: XCTestCase {
         XCTAssertEqual(status.stopReason, .leaseExpired)
     }
 
+    // Observe the lock before the agent drains, so the release is queued by
+    // quiesced rather than delivered in the initial Guardian report.
+    private func finishCleanRelock(_ broker: inout LockedUseBrokerCoordinator, lease: UUID) throws {
+        try grant(&broker, lease: lease)
+        _ = try broker.handle(.init(operation: .guardianReport, leaseID: lease,
+            session: unlocked, guards: healthy, unlockWorkPending: false), context: guardian, now: 1.5)
+        _ = try broker.handle(.init(operation: .end), context: agent, now: 1.6)
+        let lockedReport = try broker.handle(.init(operation: .guardianReport, leaseID: lease,
+            session: locked, guards: healthy, unlockWorkPending: false), context: guardian, now: 1.7)
+        XCTAssertEqual(lockedReport.phase, .relocking)
+        let drained = try broker.handle(.init(operation: .quiesced, leaseID: lease), context: agent, now: 1.8)
+        XCTAssertEqual(drained.phase, .idle)
+        XCTAssertEqual(drained.guardsReleased, false)
+    }
+
+    func testIdleGuardLostReportStillReceivesRelease() throws {
+        var broker = LockedUseBrokerCoordinator(enabled: true, backendValidated: true)
+        let lease = try prepare(&broker)
+        try finishCleanRelock(&broker, lease: lease)
+        let reply = try broker.handle(.init(operation: .guardianReport, leaseID: lease,
+            session: locked, guards: healthy, stopReason: .guardLost), context: guardian, now: 1.9)
+        XCTAssertEqual(reply.result, .release)
+        XCTAssertEqual(reply.effects, ["releaseGuards"])
+        XCTAssertEqual(reply.stopReason, .turnEnded)
+        _ = try broker.handle(.init(operation: .guardianReleased, leaseID: lease), context: guardian, now: 2)
+        XCTAssertTrue(broker.isFullyReleased)
+    }
+
+    func testReleaseReplaysAfterRecoveryAndDisconnectUntilAcknowledged() throws {
+        var broker = LockedUseBrokerCoordinator(enabled: true, backendValidated: true)
+        let lease = try prepare(&broker)
+        try finishCleanRelock(&broker, lease: lease)
+        let hello = LockedUseIPCMessage(operation: .guardianRecoveryHello, leaseID: lease)
+        let report = LockedUseIPCMessage(operation: .guardianReport, leaseID: lease, session: locked, guards: healthy)
+        for (index, request) in [hello, hello, report].enumerated() {
+            let reply = try broker.handle(request, context: guardian, now: 2 + Double(index))
+            XCTAssertEqual(reply.result, .release)
+            XCTAssertEqual(reply.effects, ["releaseGuards"])
+            XCTAssertEqual(reply.guardsReleased, false)
+            try broker.disconnected(guardian)
+        }
+        _ = try broker.handle(.init(operation: .guardianReleased, leaseID: lease), context: guardian, now: 5)
+        XCTAssertTrue(broker.isFullyReleased)
+        XCTAssertThrowsError(try broker.handle(hello, context: guardian, now: 6))
+    }
+
+    func testIdleDisconnectAndPluginFailureDoNotEndResetMachine() throws {
+        var broker = LockedUseBrokerCoordinator(enabled: true, backendValidated: true)
+        let lease = try prepare(&broker)
+        try finishCleanRelock(&broker, lease: lease)
+        XCTAssertNoThrow(try broker.disconnected(agent))
+        XCTAssertNoThrow(try broker.disconnected(guardian))
+        let finished = try broker.handle(.init(operation: .pluginFinished, stopReason: .operationFailed), context: plugin, now: 1.9)
+        XCTAssertEqual(finished.phase, .idle)
+        XCTAssertEqual(finished.stopReason, .turnEnded)
+        XCTAssertEqual(finished.guardsReleased, false)
+        XCTAssertThrowsError(try broker.handle(.init(operation: .end), context: agent, now: 2))
+    }
+
+    func testBothGuardProcessExitsClearReleaseBarrierInEitherOrder() throws {
+        let watchdog = LockedUseBrokerCoordinator.Context(id: UUID(), role: .guardian, userID: 501, auditSessionID: 42)
+        for guardianFirst in [true, false] {
+            var broker = LockedUseBrokerCoordinator(enabled: true, backendValidated: true, requiresWatchdog: true)
+            let begin = try broker.handle(.init(operation: .begin, session: locked), context: agent, now: 1)
+            let lease = try XCTUnwrap(begin.leaseID)
+            let hello = try broker.handle(.init(operation: .guardianHello, leaseID: lease, token: begin.token), context: guardian, now: 1.1)
+            _ = try broker.handle(.init(operation: .watchdogHello, leaseID: lease, token: hello.token), context: watchdog, now: 1.15)
+            _ = try broker.handle(.init(operation: .watchdogReport, leaseID: lease, session: locked, guards: healthy), context: watchdog, now: 1.18)
+            _ = try broker.handle(.init(operation: .guardianReport, leaseID: lease, session: locked, guards: healthy), context: guardian, now: 1.2)
+            try finishCleanRelock(&broker, lease: lease)
+            if guardianFirst { try broker.guardianProcessExited() }
+            else { try broker.watchdogProcessExited() }
+            XCTAssertFalse(broker.isFullyReleased)
+            if guardianFirst { try broker.watchdogProcessExited() }
+            else { try broker.guardianProcessExited() }
+            XCTAssertTrue(broker.isFullyReleased)
+            XCTAssertNil(broker.recordedGuardian)
+            XCTAssertNil(broker.recordedWatchdog)
+            XCTAssertFalse(broker.protectionDiagnostics(now: 2).watchdogProtected)
+            XCTAssertNoThrow(try broker.handle(.init(operation: .begin, session: locked), context: agent, now: 2))
+        }
+    }
+
     func testStaleIdleObservationDoesNotPermanentlyDisableLeases() throws {
         var broker = LockedUseBrokerCoordinator(enabled: true, backendValidated: true)
         try broker.suspendForPolicyObservation()

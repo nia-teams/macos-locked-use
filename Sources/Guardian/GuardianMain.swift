@@ -282,7 +282,15 @@ enum GuardianError: Error { case message(String) }
         if let healthFailure { stop(healthFailure) }
         brokerLink?.observe(current, protected: protected, stopping: stopping)
         if brokerLink?.ready == true { _ = HeartbeatPipe.send(82, to: STDOUT_FILENO) }
-        releaseSignalSeen = releaseSignalSeen || bytes.contains(76) || brokerLink?.releaseRequested == true
+        // A live, authenticated Broker rejected our previous lease. Unlike
+        // normal release, this must not wait for or initiate another relock.
+        let brokerRelease = brokerLink?.releaseRequested
+        if brokerRelease == .deniedLease {
+            shield?.close()
+            brokerLink?.finish()
+            return
+        }
+        releaseSignalSeen = releaseSignalSeen || bytes.contains(76) || brokerRelease == .normal
         let releaseRequested = releaseSignalSeen
         if releaseRequested, same, current.state == .locked { lockedAfterRelease = true }
         let localRecovery = releaseRequested && lockedAfterRelease && shield?.localRecoveryRequested == true

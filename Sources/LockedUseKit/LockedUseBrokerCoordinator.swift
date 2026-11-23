@@ -194,20 +194,20 @@ public struct LockedUseBrokerCoordinator: Sendable {
             if let pending = message.unlockWorkPending { unlockWorkDrained = !pending }
             if everGranted, session.state == .unlocked { observedUnlocked = true }
             if message.stopReason == .physicalInput { try apply(machine.localInput()) }
-            else if message.stopReason != nil, let owner {
+            else if message.stopReason != nil, let owner = stoppableOwner {
                 try apply(machine.end(owner: owner, reason: .guardLost))
             }
             if phase == .preparing {
                 if !requiresWatchdog || watchdogContext != nil && watchdogProtected && now - watchdogLastReport < 1.5 {
                     if recoveryProbe {
-                        guard guards.healthy, let owner else { throw Failure.denied }
+                        guard guards.healthy, let owner = machine.owner else { throw Failure.denied }
                         recoveryProbePrepared = true
                         try apply(machine.end(owner: owner, reason: .operationFailed))
                     } else { try apply(machine.guardsPrepared(guards, now: now, deferPermitUntilClaim: true)) }
                 }
             }
             else { try apply(machine.heartbeat(guards, now: now)) }
-            if phase == .relocking, agentDrained, unlockWorkDrained, !everGranted || observedUnlocked, let owner {
+            if phase == .relocking, agentDrained, unlockWorkDrained, !everGranted || observedUnlocked, let owner = machine.owner {
                 try machine.confirmQuiescence(owner: owner)
             }
             try apply(machine.observe(session: session, now: now))
@@ -242,13 +242,13 @@ public struct LockedUseBrokerCoordinator: Sendable {
             try check(session: session, context: context)
             watchdogLastReport = now
             watchdogProtected = message.guards?.healthy == true && message.stopReason == nil
-            if !watchdogProtected, ![.idle, .relocking, .awaitingManualUnlock].contains(phase), let owner {
+            if !watchdogProtected, let owner = stoppableOwner {
                 try apply(machine.end(owner: owner, reason: .guardLost))
             }
             if everGranted, session.state == .unlocked || message.hasObservedUnlock == true { observedUnlocked = true }
             if guardianGone {
                 observedSession = session; unlockWorkDrained = true
-                if phase == .relocking, agentDrained, !everGranted || observedUnlocked, let owner {
+                if phase == .relocking, agentDrained, !everGranted || observedUnlocked, let owner = machine.owner {
                     try machine.confirmQuiescence(owner: owner)
                 }
                 try apply(machine.observe(session: session, now: now))
@@ -272,7 +272,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
         case .pluginConsume:
             guard context.role == .plugin, context.id == pluginID, sameAuditSession(context),
                   message.leaseID == leaseID, let token = message.token,
-                  let issued, let owner else { throw Failure.denied }
+                  let issued, let owner = machine.owner else { throw Failure.denied }
             try freshGuards(now: now)
             _ = try registry.consume(attemptID: issued.attemptID, session: issued.session,
                 nonce: token, guardsHealthy: true, now: now)
@@ -282,27 +282,27 @@ public struct LockedUseBrokerCoordinator: Sendable {
             return reply(message, context: context, authorized: true)
         case .pluginFinished:
             guard context.role == .plugin, context.id == pluginID else { throw Failure.denied }
-            if message.stopReason != nil, let owner { try apply(machine.end(owner: owner, reason: .operationFailed)) }
+            if message.stopReason != nil, let owner = stoppableOwner { try apply(machine.end(owner: owner, reason: .operationFailed)) }
             return reply(message, context: context)
         case .action:
             guard isOwner(context), message.leaseID == leaseID,
-                  let owner, let session = message.session else { throw Failure.denied }
+                  let owner = machine.owner, let session = message.session else { throw Failure.denied }
             try check(session: session, context: context)
             try freshGuards(now: now)
             try apply(machine.authorizeAction(owner: owner, session: session, now: now))
             return reply(message, context: context)
         case .end:
-            guard isOwner(context), let owner else { throw Failure.denied }
+            guard isOwner(context), let owner = machine.owner else { throw Failure.denied }
             try apply(machine.end(owner: owner, reason: message.stopReason ?? .turnEnded))
             return reply(message, context: context)
         case .quiesced:
-            guard isOwner(context), let owner, message.leaseID == leaseID else { throw Failure.denied }
+            guard isOwner(context), message.leaseID == leaseID else { throw Failure.denied }
             // A consumed allow may still be queued in loginwindow. An old lock
             // screen is insufficient; require that unlock actually occurred
             // before accepting the action/transaction drain acknowledgement.
             guard unlockWorkDrained, !everGranted || observedUnlocked else { return reply(message, context: context) }
             agentDrained = true
-            if phase == .idle || phase == .awaitingManualUnlock { return reply(message, context: context) }
+            guard phase != .idle, phase != .awaitingManualUnlock, let owner = machine.owner else { return reply(message, context: context) }
             try machine.confirmQuiescence(owner: owner)
             if let session = observedSession { try apply(machine.observe(session: session, now: now)) }
             return reply(message, context: context)
@@ -320,7 +320,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
     /// an unchanged installation. New permits still require a fresh check.
     public mutating func suspendForPolicyObservation() throws {
         unshieldedDiagnostic?.cancel()
-        if let owner, ![.idle, .relocking, .awaitingManualUnlock].contains(phase) {
+        if let owner = stoppableOwner {
             try apply(machine.end(owner: owner, reason: .operationFailed))
         }
     }
@@ -357,7 +357,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
             cooldownDeadline = nil; cooldownRemainingAtRelease = nil
         }
         if requiresWatchdog, watchdogContext != nil, now - watchdogLastReport >= 1.5,
-           ![.idle, .relocking, .awaitingManualUnlock].contains(phase), let owner {
+           let owner = stoppableOwner {
             try apply(machine.end(owner: owner, reason: .guardLost))
         }
     }
@@ -365,8 +365,9 @@ public struct LockedUseBrokerCoordinator: Sendable {
     public mutating func disconnected(_ context: Context) throws {
         if context.id == unshieldedDiagnostic?.owner.id { unshieldedDiagnostic?.cancel() }
         registry.revoke(connectionID: context.id)
-        if isOwner(context), let owner { try apply(machine.end(owner: owner, reason: .disconnected)) }
-        else if isGuardian(context) || isWatchdog(context) || (context.id == pluginID && !everGranted), let owner {
+        guard let owner = stoppableOwner else { return }
+        if isOwner(context) { try apply(machine.end(owner: owner, reason: .disconnected)) }
+        else if isGuardian(context) || isWatchdog(context) || (context.id == pluginID && !everGranted) {
             try apply(machine.end(owner: owner, reason: .guardLost))
         }
     }
@@ -374,7 +375,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
     public mutating func guardianProcessExited() throws {
         guardianGone = true
         unlockWorkDrained = true
-        if let owner, ![.idle, .awaitingManualUnlock].contains(phase) {
+        if let owner = stoppableOwner {
             try apply(machine.end(owner: owner, reason: .guardLost))
         }
         if watchdogContext == nil {
@@ -384,14 +385,31 @@ public struct LockedUseBrokerCoordinator: Sendable {
         armCooldownIfReady(now: receiptTime)
     }
 
+    /// Called only after the daemon observes ESRCH for the verified watchdog.
+    public mutating func watchdogProcessExited() throws {
+        if let owner = stoppableOwner {
+            try apply(machine.end(owner: owner, reason: .guardLost))
+        }
+        watchdogContext = nil
+        watchdogProtected = false
+        if guardianGone { guardianID = nil; guardianContext = nil }
+        armCooldownIfReady(now: receiptTime)
+    }
+
     /// Called only after the daemon observes ESRCH for the kernel-verified
     /// owner process. Socket closure alone cannot prove GUI dispatch drained.
     public mutating func ownerProcessExited() throws {
-        guard phase == .relocking, let owner, unlockWorkDrained,
+        guard phase == .relocking, let owner = machine.owner, unlockWorkDrained,
               !everGranted || observedUnlocked else { return }
         agentDrained = true
         try machine.confirmQuiescence(owner: owner)
         if let session = observedSession { try apply(machine.observe(session: session, now: receiptTime)) }
+    }
+
+    // Transport identity outlives the machine's lease so guards can acknowledge
+    // release after reset. Only active machine owners may trigger a new stop.
+    private var stoppableOwner: LockedUseStateMachine.Owner? {
+        [.idle, .relocking, .awaitingManualUnlock].contains(machine.phase) ? nil : machine.owner
     }
 
     private func check(session: LockedUseSession, context: Context) throws {
@@ -449,6 +467,7 @@ public struct LockedUseBrokerCoordinator: Sendable {
         if isGuardian(context) {
             effects = guardianEffects; guardianEffects.removeAll()
             if effects.contains("releaseGuards") { releaseSent = true }
+            else if releaseSent { effects.append("releaseGuards") }
         }
         if isWatchdog(context), releaseSent || guardianGone && guardianEffects.contains("releaseGuards") {
             if guardianGone { guardianEffects.removeAll { $0 == "releaseGuards" }; releaseSent = true }

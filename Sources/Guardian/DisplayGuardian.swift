@@ -60,6 +60,8 @@ final class DisplayGuardian: NSObject {
     private var hasObservedUnlock = false
     private var brokerReportInFlight = false
     private var lastBrokerReport: TimeInterval = 0
+    private var brokerRetryDelay: TimeInterval = 0
+    private var nextBrokerRetry: TimeInterval = 0
     private var unlockWorkPending = false
     private var unlockRequested = false
     private let unlockCancellation = UnlockCancellation()
@@ -402,7 +404,7 @@ final class DisplayGuardian: NSObject {
             if policy.phase != .preparing {
                 if policy.localRecoveryReady { shields.allowLocalLoginInput() }
                 execute(try policy.poll(session: current, topology: displayTopology(), guardsHealthy: healthy,
-                    lockPresentationReady: lockPresentation.ready(session: current, requested: policy.phase == .relocking, now: now), now: now))
+                    lockPresentationReady: lockPresentation.ready(session: current, requested: policy.phase == .relocking && policy.isQuiesced, now: now), now: now))
             }
             if policy.phase != .preparing, policy.phase != .finished {
                 reportToBroker(now: now, session: current, coverage: coverage,
@@ -430,7 +432,7 @@ final class DisplayGuardian: NSObject {
         execute(policy.stop(reason, now: ProcessInfo.processInfo.systemUptime))
     }
 
-    private func execute(_ effects: [LockedUseGuardianPolicy.Effect]) {
+    private func execute(_ effects: [LockedUseGuardianPolicy.Effect], deniedLease: Bool = false) {
         for effect in effects {
             switch effect {
             case .requestRelock:
@@ -451,11 +453,11 @@ final class DisplayGuardian: NSObject {
                         "lockedBeforeGuardianResumed": stallResumedLocked,
                         "independentRelockReported": watchdogRelockSeen])
                 }
-                if let watchdogInput { _ = HeartbeatPipe.send(76, to: watchdogInput.fileDescriptor) }
+                if !deniedLease, let watchdogInput { _ = HeartbeatPipe.send(76, to: watchdogInput.fileDescriptor) }
                 let localRecovery = policy.localRecoveryReady && LockedUseSession.current().state == .unlocked
-                emit(localRecovery ? "localRecoveryReleased" : "lockConfirmed",
+                emit(deniedLease ? "deniedLeaseReleased" : localRecovery ? "localRecoveryReleased" : "lockConfirmed",
                     details: ["shieldReleased": true, "unlockRequested": false])
-                if let bootstrap = brokerBootstrap {
+                if !deniedLease, let bootstrap = brokerBootstrap {
                     let observed = hasObservedUnlock
                     cleanup()
                     Task { @MainActor in
@@ -502,14 +504,20 @@ final class DisplayGuardian: NSObject {
     private func reportToBroker(now: TimeInterval, session: LockedUseSession, coverage: Bool,
                                 inputHealthy: Bool, watchdogHealthy: Bool) {
         guard policy.phase != .finished, let bootstrap = brokerBootstrap,
-              !brokerReportInFlight, now - lastBrokerReport >= 0.1 else { return }
+              !brokerReportInFlight, now >= nextBrokerRetry, now - lastBrokerReport >= 0.1 else { return }
         brokerReportInFlight = true
         lastBrokerReport = now
         let generation = SHA256.hash(data: Data(topology.utf8)).prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
         let guards = LockedUseStateMachine.Guards(allDisplaysCovered: coverage,
             inputTapHealthy: inputHealthy, watchdogHealthy: watchdogHealthy, displayGeneration: generation)
-        let reason: LockedUseStateMachine.StopReason? = stopping
-            ? policy.reason == .localInput ? .physicalInput : .guardLost : nil
+        let reason: LockedUseStateMachine.StopReason?
+        if stopping {
+            switch policy.reason {
+            case .localInput: reason = .physicalInput
+            case .stopRequested: reason = nil
+            default: reason = .guardLost
+            }
+        } else { reason = nil }
         let message = LockedUseIPCMessage(operation: .guardianReport, leaseID: bootstrap.leaseID,
             session: session, guards: guards, stopReason: reason, unlockWorkPending: unlockWorkPending)
         Task { @MainActor in
@@ -523,30 +531,51 @@ final class DisplayGuardian: NSObject {
                         let candidate = try LockedUseIPCClient(endpoint: .guardian, brokerRequirement: LockedUseSigningIdentity.brokerRequirement())
                         let hello = try candidate.request(.init(operation: .guardianRecoveryHello, leaseID: bootstrap.leaseID,
                             session: .current(), unlockWorkPending: false, hasObservedUnlock: observed))
-                        guard hello.result != .denied else { candidate.close(); throw GuardianError.message("Guardian recovery denied") }
-                        return candidate
+                        return (candidate, hello)
                     }.value
-                    brokerClient = recovered; client = recovered
+                    let (candidate, hello) = recovered
+                    guard policy.phase != .finished else { Task.detached { candidate.close() }; return }
+                    if hello.result == .denied {
+                        Task.detached { candidate.close() }
+                        unlockCancellation.cancel()
+                        execute(policy.releaseForDeniedLease(), deniedLease: true)
+                        return
+                    }
+                    brokerClient = candidate; client = candidate
+                    try handleBrokerEffects(hello.effects)
+                    if hello.effects.contains("releaseGuards") || policy.phase == .finished {
+                        brokerRetryDelay = 0
+                        nextBrokerRetry = 0
+                        return
+                    }
                 }
                 let reply = try await Task.detached { try client.request(message) }.value
                 guard policy.phase != .finished else { return }
                 guard reply.result != .denied else { throw GuardianError.message("Broker denied Guardian report") }
-                for effect in reply.effects {
-                    switch effect {
-                    case "requestUnlock": requestNativeUnlock()
-                    case "cancelUnlock": unlockCancellation.cancel()
-                    case "requestRelock": stop(.stopRequested)
-                    case "releaseGuards":
-                        policy.confirmQuiescence()
-                        execute(policy.stop(.stopRequested, now: ProcessInfo.processInfo.systemUptime))
-                    default: throw GuardianError.message("Unknown Broker Guardian effect")
-                    }
-                }
+                try handleBrokerEffects(reply.effects)
+                brokerRetryDelay = 0
+                nextBrokerRetry = 0
             } catch {
                 guard policy.phase != .finished else { return }
                 stop(.parentDisconnected)
+                brokerRetryDelay = min(2, max(0.25, brokerRetryDelay * 2))
+                nextBrokerRetry = ProcessInfo.processInfo.systemUptime + brokerRetryDelay
                 if let failed = brokerClient { Task.detached { failed.close() } }
                 brokerClient = nil
+            }
+        }
+    }
+
+    private func handleBrokerEffects(_ effects: [String]) throws {
+        for effect in effects {
+            switch effect {
+            case "requestUnlock": requestNativeUnlock()
+            case "cancelUnlock": unlockCancellation.cancel()
+            case "requestRelock": stop(.stopRequested)
+            case "releaseGuards":
+                policy.confirmQuiescence()
+                execute(policy.stop(.stopRequested, now: ProcessInfo.processInfo.systemUptime))
+            default: throw GuardianError.message("Unknown Broker Guardian effect")
             }
         }
     }

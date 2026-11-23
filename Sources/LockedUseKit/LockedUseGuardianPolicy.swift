@@ -20,6 +20,7 @@ public struct LockedUseGuardianPolicy: Sendable {
     private var quiesced = false
     private var lockedAfterDrain = false
     private var localRecoveryRequested = false
+    public var isQuiesced: Bool { quiesced }
     public var localRecoveryReady: Bool { quiesced && lockedAfterDrain && localRecoveryRequested }
     public mutating func requestLocalRecovery() { localRecoveryRequested = true }
     private var topology: String?
@@ -72,6 +73,16 @@ public struct LockedUseGuardianPolicy: Sendable {
 
     public mutating func confirmQuiescence() { quiesced = true }
     public mutating func requireQuiescence() { quiesced = false; lockedAfterDrain = false }
+
+    /// Only for a recovery denial from the authenticated Broker. There is no
+    /// live lease to drain, and relocking could lock out the console user.
+    public mutating func releaseForDeniedLease() -> [Effect] {
+        guard phase != .finished else { return [] }
+        confirmQuiescence()
+        reason = .stopRequested
+        phase = .finished
+        return [.releaseShield]
+    }
 
     public mutating func poll(session current: LockedUseSession, topology currentTopology: String,
                               guardsHealthy: Bool, lockPresentationReady: Bool = false, now: TimeInterval) throws -> [Effect] {
