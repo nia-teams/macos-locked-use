@@ -1,32 +1,74 @@
 import Foundation
 
-/// A synchronous repair/verification budget, NOT permission to report an
-/// uncovered display as healthy. Both independent guards use this same path.
-public enum LockedUseShieldRepair {
-    public static let timeout: TimeInterval = 0.2
-    public static let interval: TimeInterval = 0.01
+/// Per-surface, monotonic bounds recovery. Integrity/topology failures latch
+/// until teardown; only a previously verified, unlocked surface gets grace.
+public struct LockedUseShieldRepair: Sendable {
+    public static let timeout: TimeInterval = 1.2
+    public private(set) var latchedFailure: String?
+    public private(set) var mismatchStarted: TimeInterval?
+    private var initialTopology: String?
+    private var verifiedCoverage = false
+    private var lastNow: TimeInterval?
 
-    /// Only displacement gets a short WindowServer commit window. Missing,
-    /// transparent, wrong-owner/layer windows and topology changes fail at once.
-    /// No run-loop pumping: it could reenter health/RPC and publish stale health.
-    public static func verify(check: () -> String?, repair: () -> Void,
-                              now: () -> TimeInterval, wait: (TimeInterval) -> Void) -> String? {
-        guard var failure = check() else { return nil }
-        guard failure.hasPrefix("shieldBoundsMismatch ") else { return failure }
-        let started = now()
-        guard started.isFinite, started >= 0 else { return failure }
-        // The attempt cap also bounds a stalled/invalid clock or no-op wait.
-        for _ in 0..<20 {
-            repair()
-            let before = now()
-            guard before.isFinite, before >= started, before - started < timeout else { return failure }
-            wait(min(interval, timeout - (before - started)))
-            let after = now()
-            guard after.isFinite, after >= before, after - started <= timeout else { return failure }
-            guard let observed = check() else { return nil }
-            failure = observed
-            guard failure.hasPrefix("shieldBoundsMismatch ") else { return failure }
+    public init() {}
+
+    public mutating func observeTopology(_ topology: String) {
+        if let initialTopology {
+            if topology != initialTopology { latch("topologyChanged") }
+        } else if !topology.isEmpty {
+            initialTopology = topology
+        } else { latch("topologyUnavailable") }
+    }
+
+    public mutating func latch(_ failure: String) {
+        if latchedFailure == nil { latchedFailure = failure }
+    }
+
+    /// Nil during active bounds-only recovery means continued protection under
+    /// the bounded transition policy, NOT geometrically verified full coverage.
+    /// The caller must validate every window's integrity on every tick first.
+    public mutating func failure(observed: String?, unlocked: Bool, now: TimeInterval) -> String? {
+        if let latchedFailure { return latchedFailure }
+        guard now.isFinite, now >= 0, lastNow.map({ now >= $0 }) ?? true else {
+            latch("shieldClockInvalid")
+            return latchedFailure
         }
-        return failure
+        lastNow = now
+        if let observed, !observed.hasPrefix("shieldBoundsMismatch ") {
+            latch(observed)
+            return latchedFailure
+        }
+        // A delayed tick must not resurrect a surface after its deadline, even
+        // if the first new observation is geometrically healthy.
+        if let mismatchStarted, now - mismatchStarted >= Self.timeout {
+            latch(observed ?? "shieldBoundsMismatch recoveryDeadlineExpired")
+            return latchedFailure
+        }
+        if observed == nil {
+            verifiedCoverage = true
+            mismatchStarted = nil
+            return nil
+        }
+        guard unlocked, verifiedCoverage else { return observed }
+        if mismatchStarted == nil { mismatchStarted = now }
+        return nil
+    }
+
+    public enum StagingFailure: Error { case noDisplays, duplicateDisplay }
+
+    /// Construct a complete replacement off to the side. On any error dispose
+    /// only staged candidates; ownership of the live collection never changes.
+    public static func stage<Key: Hashable, Value>(ids: [Key], make: (Key) throws -> Value,
+                                                   discard: (Value) -> Void) throws -> [Key: Value] {
+        guard !ids.isEmpty else { throw StagingFailure.noDisplays }
+        guard Set(ids).count == ids.count else { throw StagingFailure.duplicateDisplay }
+        var staged: [Key: Value] = [:]
+        do {
+            for id in ids { staged[id] = try make(id) }
+            return staged
+        } catch {
+            for value in staged.values { discard(value) }
+            throw error
+        }
     }
 }

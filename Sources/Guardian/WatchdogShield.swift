@@ -93,6 +93,7 @@ final class WatchdogShield {
     }
     func cancelNativeClick() { clickAllowance?.revoke(); returnAllowance?.revoke() }
     func updateStatus(now: TimeInterval, session: LockedUseSession, stopping: Bool) {
+        if session.state == .unlocked { surface.observeUnlockedSession() }
         if let message = shieldStatus.update(now: now, startupDeadline: startupDeadline,
             unlocked: session.state == .unlocked, stopping: stopping) {
             surface.updateMessage(message)

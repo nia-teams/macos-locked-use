@@ -373,7 +373,10 @@ final class DisplayGuardian: NSObject {
             // is ready. A child heartbeat alone cannot arm it during startup.
             if watchdogHealthy, policy.phase == .shielding { execute(try policy.heartbeat(now: now)) }
             let current = LockedUseSession.current()
-            if current.state == .unlocked, brokerBootstrap != nil { hasObservedUnlock = true }
+            if current.state == .unlocked {
+                shields.observeUnlockedSession()
+                if brokerBootstrap != nil { hasObservedUnlock = true }
+            }
             if brokerBootstrap != nil, let message = shieldStatus.update(now: now,
                 startupDeadline: brokerBootstrap?.startupDeadline,
                 unlocked: hasObservedUnlock, stopping: stopping) {

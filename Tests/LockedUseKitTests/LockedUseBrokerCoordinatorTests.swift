@@ -28,6 +28,41 @@ final class LockedUseBrokerCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try broker.handle(.init(operation: .pluginConsume, leaseID: lease, token: claim.token), context: plugin, now: 1.4))
     }
 
+    func testChainedActionSurvivesBoundedSpaceSlideButPersistentDriftRelocks() throws {
+        var broker = LockedUseBrokerCoordinator(enabled: true, backendValidated: true)
+        let lease = try prepare(&broker)
+        try grant(&broker, lease: lease)
+        var surface = LockedUseShieldRepair()
+        surface.observeTopology("display-1")
+        XCTAssertNil(surface.failure(observed: nil, unlocked: false, now: 1.2))
+        _ = try broker.handle(.init(operation: .guardianReport, leaseID: lease,
+            session: unlocked, guards: healthy, unlockWorkPending: false), context: guardian, now: 1.5)
+        let mismatch = "shieldBoundsMismatch SpaceSlide"
+        for time in [1.6, 1.8, 2.0, 2.2] {
+            let failure = surface.failure(observed: mismatch, unlocked: true, now: time)
+            let guards = LockedUseStateMachine.Guards(allDisplaysCovered: failure == nil,
+                inputTapHealthy: true, watchdogHealthy: true, displayGeneration: 1)
+            _ = try broker.handle(.init(operation: .guardianReport, leaseID: lease,
+                session: unlocked, guards: guards, unlockWorkPending: false), context: guardian, now: time)
+            // This is the exact Broker operation used by validateExec/GUI validators.
+            let action = try broker.handle(.init(operation: .action, leaseID: lease,
+                session: unlocked), context: agent, now: time)
+            XCTAssertEqual(action.result, .active)
+        }
+        XCTAssertNil(surface.failure(observed: nil, unlocked: true, now: 2.25))
+        XCTAssertNil(surface.failure(observed: mismatch, unlocked: true, now: 2.3))
+        let failure = surface.failure(observed: mismatch, unlocked: true, now: 3.51)
+        XCTAssertNotNil(failure)
+        let guards = LockedUseStateMachine.Guards(allDisplaysCovered: failure == nil,
+            inputTapHealthy: true, watchdogHealthy: true, displayGeneration: 1)
+        let stopped = try broker.handle(.init(operation: .guardianReport, leaseID: lease,
+            session: unlocked, guards: guards, unlockWorkPending: false), context: guardian, now: 3.51)
+        XCTAssertEqual(stopped.stopReason, .guardLost)
+        XCTAssertEqual(broker.phase, .relocking)
+        XCTAssertThrowsError(try broker.handle(.init(operation: .action, leaseID: lease,
+            session: unlocked), context: agent, now: 3.52))
+    }
+
     func testPhysicalTakeoverAutomaticallyResetsOnlyAfterGuardReleaseAndManualUnlock() throws {
         var broker = LockedUseBrokerCoordinator(enabled: true, backendValidated: true)
         let lease = try prepare(&broker)

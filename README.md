@@ -279,13 +279,19 @@ python3 scripts/check-source.py
 
 ## Shield bounds protection (component 0.1.4)
 
-Both Guardian and Watchdog pin independent shield windows to their assigned
-screens across application activation and Space changes. Bounds drift triggers
-re-anchoring and at most 200 ms of synchronous WindowServer verification; only
-observed full coverage is healthy. Persistent drift or missing/invalid shields
-still relock and enter configured recovery. Display topology changes replace
-coverage but deliberately end the current lease fail-closed.
+Both Guardian and Watchdog pin independent shields to their assigned screens and
+flush AppKit/CoreAnimation changes after re-anchoring. Preparation requires actual
+full coverage before unlock. After verified preparation and observed unlock, a
+bounds-only Space slide may recover across ordinary RunLoop ticks for at most
+1.2 seconds from its first mismatch; neither polling nor chained action validation
+blocks the main thread. This bounded continuity state is not a claim of actual
+geometric coverage during the animation. Every shield must remain onscreen with
+our PID, valid bounds, alpha >= 0.99 and its required level throughout the window.
+Missing/invalid shields, topology changes and expired recovery fail closed.
 
+Topology failure is latched for the surface lifetime, including notification-first
+changes. Replacement windows are staged atomically; failed/empty staging retains
+existing windows. Reconciliation never makes the current lease healthy again.
 Existing root-installed 0.1.3 helpers require administrator-authorized component
-update; updating only the host app does not replace them. This source snapshot
-uses component version 0.1.4; it does not imply an upstream 0.1.4 tag is published.
+update; updating only the host app does not replace them. This local component
+0.1.4 snapshot does not imply an upstream 0.1.4 tag is published.

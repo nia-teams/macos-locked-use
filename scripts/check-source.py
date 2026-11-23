@@ -14,36 +14,60 @@ def read(name):
 
 
 class SourceTests(unittest.TestCase):
-    def test_shield_pinning_and_verified_bounded_repair(self):
+    def test_shield_pinning_and_nonblocking_bounded_repair(self):
         surface = read("Sources/Guardian/DisplayShieldSurface.swift")
         for token in ["private var pinnedFrame: NSRect?", "pinnedFrame ?? frameRect",
                       "super.setFrame(pinnedFrame ?? frameRect, display: flag)",
                       "NSWindow.didMoveNotification", "NSWindow.didResizeNotification",
                       "NSWindow.didChangeScreenNotification", "NSWorkspace.activeSpaceDidChangeNotification",
                       "NSApplication.didChangeScreenParametersNotification", "guard !reanchoring",
-                      "self.reanchor(force: true)", "LockedUseShieldRepair.verify",
+                      "reanchor(force: true)", "recovery.failure(observed:", "CATransaction.flush()", "import QuartzCore",
                       "[.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]",
                       "LockedUseShieldCoverage.screenLocalRect", "CGDisplayBounds(id)",
-                      "window.windowNumber", "getpid()", "try? reconcileScreens()"]:
+                      "window.windowNumber", "getpid()", "alpha.isFinite, alpha >= 0.99, alpha <= 1"]:
             self.assertIn(token, surface)
-        self.assertLess(surface.index("window.contentView = appearance"), surface.index("window.pin(to: frame)"))
-        self.assertLess(surface.index("appearances[id] = appearance"), surface.index("for window in oldWindows.values"))
+        health = surface[surface.index("    func coverageFailure()"):]
+        for forbidden in ["Thread.sleep", "RunLoop.main.run", "RunLoop.current.run", "try? reconcileScreens()"]:
+            self.assertNotIn(forbidden, health)
         repair = read("Sources/LockedUseKit/LockedUseShieldRepair.swift")
-        for token in ["timeout: TimeInterval = 0.2", "interval: TimeInterval = 0.01",
-                      'failure.hasPrefix("shieldBoundsMismatch ")', "for _ in 0..<20",
-                      "after - started <= timeout", "guard let observed = check() else { return nil }"]:
+        for token in ["timeout: TimeInterval = 1.2", "mismatchStarted", "verifiedCoverage",
+                      "guard unlocked, verifiedCoverage", "now - mismatchStarted >= Self.timeout",
+                      "if latchedFailure == nil", "initialTopology", 'latch("topologyChanged")']:
             self.assertIn(token, repair)
-        self.assertNotIn("RunLoop", repair)
-        self.assertIn("private let shields = DisplayShieldSurface()", read("Sources/Guardian/DisplayGuardian.swift"))
-        self.assertIn("private let surface = DisplayShieldSurface()", read("Sources/Guardian/WatchdogShield.swift"))
-        watchdog = read("Sources/Guardian/GuardianMain.swift")
-        self.assertIn("let healthFailure = shield?.healthFailure", watchdog)
-        self.assertIn("if let healthFailure { stop(healthFailure) }", watchdog)
+        self.assertNotIn("Thread.sleep", repair)
+        self.assertIn("shields.observeUnlockedSession()", read("Sources/Guardian/DisplayGuardian.swift"))
+        self.assertIn("surface.observeUnlockedSession()", read("Sources/Guardian/WatchdogShield.swift"))
+        self.assertIn("let healthFailure = shield?.healthFailure", read("Sources/Guardian/GuardianMain.swift"))
+
+    def test_topology_is_latched_before_atomic_staging_and_never_swallowed(self):
+        surface = read("Sources/Guardian/DisplayShieldSurface.swift")
+        notification = surface[surface.index("    @objc private func surfaceChanged"):surface.index("    func observeUnlockedSession")]
+        self.assertIn("reconcileTopologyIfNeeded()", notification)
+        reconcile = surface[surface.index("    private func reconcileTopologyIfNeeded"):surface.index("    private func reanchor")]
+        self.assertLess(reconcile.index("recovery.observeTopology(current)"), reconcile.index("try reconcileScreens()"))
+        self.assertIn('catch { recovery.latch("shieldReconciliationFailed") }', reconcile)
+        staging = surface[surface.index("    private func reconcileScreens()"):surface.index("    func coverageHealthy()")]
+        self.assertNotIn("windows.removeAll()", staging)
+        self.assertNotIn("appearances.removeAll()", staging)
+        self.assertLess(staging.index("LockedUseShieldRepair.stage"), staging.index("windows = staged.mapValues"))
+        self.assertLess(staging.index("appearances = staged.mapValues"), staging.index("for window in oldWindows.values"))
+        health = surface[surface.index("    func coverageFailure()"):surface.index("    private func rawCoverageFailure()")]
+        self.assertIn("if let failure = recovery.latchedFailure { return failure }", health)
+        self.assertNotIn("try?", surface)
+
+    def test_space_recovery_and_atomic_staging_regressions_are_exercised(self):
         tests = read("Tests/LockedUseKitTests/LockedUseShieldRepairTests.swift")
         for token in ["width: 1512, height: 982", "x: -1921, y: -243, width: 2260, height: 1469",
-                      "testPersistentDisplacementFailsClosedWithinBudget", "testDisappearingShieldDuringRepairFailsImmediately",
-                      "testStalledInvalidAndOvershootingClocksCannotExtendBudget", "testPersistentMismatchRequestsRelock"]:
+                      "testReportedSpaceSlideSurvivesSixHundredMillisecondsAndResets",
+                      "testTopologyNotificationBeforePollLatchesAcrossSuccessfulReconciliation",
+                      "testEmptyStagingPreservesLiveWindowsAndLatchesFailure",
+                      "testFailedStagingClosesOnlyCandidatesAndPreservesLiveWindows",
+                      "testPreparationAndUnverifiedSurfacesNeverGetGrace",
+                      "testIntegrityFailuresImmediatelyAbortActiveRecovery",
+                      "testPersistentMismatchRequestsRelock"]:
             self.assertIn(token, tests)
+        self.assertIn("testChainedActionSurvivesBoundedSpaceSlideButPersistentDriftRelocks",
+                      read("Tests/LockedUseKitTests/LockedUseBrokerCoordinatorTests.swift"))
 
     def test_manifest_is_standalone(self):
         manifest = read("Package.swift")
