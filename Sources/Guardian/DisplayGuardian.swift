@@ -106,7 +106,9 @@ final class DisplayGuardian: NSObject {
                 guard hello.result != .denied, let token = hello.token else { throw GuardianError.message("Broker rejected Guardian identity/challenge") }
                 validationConfirmation = hello.validationConfirmation == true
                 let clickTag = Int64.random(in: 1...Int64.max)
-                clickAllowance = .init(tag: clickTag, sender: getpid(), now: ProcessInfo.processInfo.systemUptime)
+                let clickNow = ProcessInfo.processInfo.systemUptime
+                clickAllowance = .init(tag: clickTag, sender: getpid(), now: clickNow,
+                    lifetime: LockedUseClickAllowance.startupLifetime(now: clickNow, startupDeadline: bootstrap.startupDeadline))
                 let returnTag = validationConfirmation ? Int64.random(in: 1...Int64.max) : nil
                 if let returnTag { returnAllowance = .init(tag: returnTag, sender: getpid(), session: policy.session, now: ProcessInfo.processInfo.systemUptime) }
                 watchdogBootstrap = try .init(leaseID: bootstrap.leaseID, token: token, clickTag: clickTag, returnTag: returnTag,
@@ -355,7 +357,10 @@ final class DisplayGuardian: NSObject {
                     preparationLogger.notice("preparing elapsedMilliseconds=\(Int((now - self.started) * 1000), privacy: .public) watchdogReady=\(self.watchdogReady, privacy: .public) coverage=\(failure, privacy: .public)")
                 }
                 // Initial AppKit drawing and child launch can take a few frames.
-                if now - started >= 3.5 {
+                // The first shield window on a large display can also stall the
+                // main loop in compositor warm-up; keep a bounded but realistic
+                // budget so the guard reports ready instead of self-aborting.
+                if now - started >= 12.0 {
                     emit("preparationFailed", details: ["coverageFailure": shields.coverageFailure() ?? "",
                         "watchdogReady": watchdogReady, "watchdogRunning": watchdog?.isRunning == true,
                         "watchdogPipeFailed": watchdogReader?.failed ?? true])

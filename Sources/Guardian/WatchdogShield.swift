@@ -23,7 +23,11 @@ final class WatchdogShield {
         self.stop = stop
         self.startupDeadline = startupDeadline
         if let returnTag { returnAllowance = .init(tag: returnTag, sender: getppid(), session: LockedUseSession.current(), now: ProcessInfo.processInfo.systemUptime) }
-        if let clickTag { clickAllowance = .init(tag: clickTag, sender: getppid(), now: ProcessInfo.processInfo.systemUptime) }
+        if let clickTag {
+            let now = ProcessInfo.processInfo.systemUptime
+            clickAllowance = .init(tag: clickTag, sender: getppid(), now: now,
+                lifetime: LockedUseClickAllowance.startupLifetime(now: now, startupDeadline: startupDeadline))
+        }
         NSApplication.shared.setActivationPolicy(.accessory)
         let message = shieldStatus.update(now: ProcessInfo.processInfo.systemUptime,
             startupDeadline: startupDeadline, unlocked: false, stopping: false)!

@@ -14,10 +14,30 @@ public struct LockedUseClickAllowance: Sendable {
     private var revoked = false
 
     public init(tag: Int64, sender: Int32, now: TimeInterval) {
-        self.tag = tag; self.sender = sender; deadline = now + 5; began = now
-        revoked = tag == 0 || sender <= 0 || !now.isFinite
+        self.init(tag: tag, sender: sender, now: now, lifetime: 5)
+    }
+
+    /// `lifetime` lets a caller cover a longer, broker-bounded startup window.
+    /// The single-use tag, sender and lock-UI target checks still apply.
+    public init(tag: Int64, sender: Int32, now: TimeInterval, lifetime: TimeInterval) {
+        self.tag = tag; self.sender = sender
+        let window = lifetime.isFinite && lifetime > 0 ? lifetime : 5
+        deadline = now + window; began = now
+        revoked = tag == 0 || sender <= 0 || !now.isFinite || !window.isFinite
     }
     public mutating func revoke() { revoked = true; down = nil }
+    /// Window that covers the broker's startup budget. The first shield
+    /// composition can stall the main loop for seconds before the one-use
+    /// lock-UI click is posted; the window still stays bounded so a tag cannot
+    /// be replayed later in the lease.
+    public static func startupLifetime(now: TimeInterval, startupDeadline: TimeInterval?) -> TimeInterval {
+        guard let startupDeadline, startupDeadline.isFinite, now.isFinite else { return 5 }
+        return min(15, max(5, startupDeadline - now + 2))
+    }
+    /// Diagnostics only: exposes the acceptance window for log correlation.
+    public func windowDiagnostics(now: TimeInterval) -> String {
+        "start=\(began) end=\(deadline) now=\(now) revoked=\(revoked)"
+    }
     public mutating func accept(button: Button, tag candidate: Int64, sender candidateSender: Int32,
         target: Int32, window: Int64, x: Double, y: Double, now: TimeInterval, locked: Bool) -> Bool {
         rejection = nil
