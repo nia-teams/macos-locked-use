@@ -15,14 +15,22 @@ final class WatchdogShield {
     private var returnAllowance: LockedUseReturnAllowance?
     private(set) var localRecoveryRequested = false
     private var localRecoveryEnabled = false
+    private let initialSession: LockedUseSession
+    private(set) var isStopping = false
+    private var hostProcessFilter: LockedUseHostProcessFilter?
     private let startupDeadline: TimeInterval?
     private var shieldStatus = LockedUseShieldStatus()
     private let stop: @MainActor (String) -> Void
 
-    init(clickTag: Int64? = nil, returnTag: Int64? = nil, startupDeadline: TimeInterval? = nil, stop: @escaping @MainActor (String) -> Void) throws {
+    init(clickTag: Int64? = nil, returnTag: Int64? = nil, startupDeadline: TimeInterval? = nil,
+         initialSession: LockedUseSession = .current(), stop: @escaping @MainActor (String) -> Void) throws {
         self.stop = stop
         self.startupDeadline = startupDeadline
-        if let returnTag { returnAllowance = .init(tag: returnTag, sender: getppid(), session: LockedUseSession.current(), now: ProcessInfo.processInfo.systemUptime) }
+        self.initialSession = initialSession
+        if startupDeadline != nil, let approvals = try? LockedUseClientApprovals.loadInstalled() {
+            hostProcessFilter = .init(approvals: approvals, userID: initialSession.userID)
+        }
+        if let returnTag { returnAllowance = .init(tag: returnTag, sender: getppid(), session: initialSession, now: ProcessInfo.processInfo.systemUptime) }
         if let clickTag { clickAllowance = .init(tag: clickTag, sender: getppid(), now: ProcessInfo.processInfo.systemUptime) }
         NSApplication.shared.setActivationPolicy(.accessory)
         let message = shieldStatus.update(now: ProcessInfo.processInfo.systemUptime,
@@ -46,7 +54,14 @@ final class WatchdogShield {
                                 recordLockUIClickAdmission(filter: "watchdog", type: type)
                                 return true
                             }
-                            shield.cancelNativeClick()
+                            let session = shield.initialSession
+                            if !shield.isStopping, type != .tapDisabledByTimeout, type != .tapDisabledByUserInput,
+                               shield.hostProcessFilter?.accepts(
+                                   sourcePID: Int32(clamping: event.getIntegerValueField(.eventSourceUnixProcessID)),
+                                   session: .init(state: .unlocked, userID: session.userID, auditSessionID: session.auditSessionID),
+                                   currentSession: LockedUseSession.current(), stopping: shield.isStopping
+                               ) == true { return true }
+                            shield.markStopping()
                             shield.stop("filterEvent")
                             return false
                         }
@@ -62,9 +77,9 @@ final class WatchdogShield {
             CGEvent.tapEnable(tap: tap, enable: true)
             let monitor = PhysicalInputMonitor(activity: { [weak self] in
                 self?.localRecoveryRequested = true
-                self?.cancelNativeClick(); stop("hardwareActivity")
+                self?.markStopping(); stop("hardwareActivity")
             },
-                failure: { [weak self] in self?.cancelNativeClick(); stop("hardwareMonitorFailure") })
+                failure: { [weak self] in self?.markStopping(); stop("hardwareMonitorFailure") })
             self.monitor = monitor
             try monitor.start()
         } catch { close(); throw error }
@@ -91,7 +106,13 @@ final class WatchdogShield {
         localRecoveryEnabled = true
         surface.allowLocalLoginInput()
     }
-    func cancelNativeClick() { clickAllowance?.revoke(); returnAllowance?.revoke() }
+    func markStopping() {
+        guard !isStopping else { return }
+        isStopping = true
+        cancelNativeClick()
+        if !localRecoveryEnabled { surface.blockLocalMouseInput() }
+    }
+    private func cancelNativeClick() { clickAllowance?.revoke(); returnAllowance?.revoke() }
     func updateStatus(now: TimeInterval, session: LockedUseSession, stopping: Bool) {
         if session.state == .unlocked { surface.observeUnlockedSession() }
         if let message = shieldStatus.update(now: now, startupDeadline: startupDeadline,

@@ -35,6 +35,7 @@ final class DisplayShieldSurface: NSObject {
     private var staging = false
     private var recovery = LockedUseShieldRepair()
     private var observedUnlock = false
+    private var blocksLocalMouseInput = false
     var count: Int { windows.count }
 
     private func installObservers() {
@@ -96,9 +97,15 @@ final class DisplayShieldSurface: NSObject {
         }
     }
 
+    func blockLocalMouseInput() {
+        blocksLocalMouseInput = true
+        for window in windows.values { window.ignoresMouseEvents = false }
+    }
+
     /// Only after root drain, an observed original-session lock and actual
     /// hardware takeover. Keep opaque coverage while loginwindow takes input.
     func allowLocalLoginInput() {
+        blocksLocalMouseInput = false
         for window in windows.values { window.ignoresMouseEvents = true }
     }
 
@@ -109,6 +116,7 @@ final class DisplayShieldSurface: NSObject {
         recovery = LockedUseShieldRepair()
         observedUnlock = false
         staging = false
+        blocksLocalMouseInput = false
         for window in windows.values { window.close() }
         windows.removeAll()
         appearances.removeAll()
@@ -215,7 +223,9 @@ final class DisplayShieldSurface: NSObject {
             window.isOpaque = true
             window.alphaValue = 1
             window.hasShadow = false
-            window.ignoresMouseEvents = false
+            // The session tap, not the opaque panel, filters input during a lease.
+            window.ignoresMouseEvents = true
+            if blocksLocalMouseInput { window.ignoresMouseEvents = false }
             window.sharingType = .none
             window.isReleasedWhenClosed = false
             let appearance = ShieldAppearance(frame: NSRect(origin: .zero, size: frame.size), screen: screen, message: message)

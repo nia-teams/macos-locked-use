@@ -5,7 +5,7 @@ description: Capture windows, click, type, press shortcuts, and run Accessibilit
 
 # macOS Locked Use
 
-During a Locked Use session, all displays remain covered by privacy shields and local physical input takes precedence over automation. Operate applications through window-addressed channels (`locked-use capture / click / type / key` and `AXUIElement` actions); events on the global input stream are treated as local user input and relock the screen.
+During a Locked Use session, all displays remain covered by privacy shields and local physical input takes precedence over automation. Operate applications through window-addressed channels (`locked-use capture / click / type / key` and `AXUIElement` actions), or synthetic global input posted from the enrolled agent’s same-user process tree (component 0.1.6+); physical input and events from unrelated processes are treated as local user input and relock the screen.
 
 Consecutive commands share a per-user lease (30s idle window, 300s max). Call `locked-use end` when the task finishes.
 
@@ -33,7 +33,9 @@ locked-use end
 
 Recovery policy: `locked-use enable --cooldown <seconds|manual>` accepts finite seconds greater than zero and at most 86400; `manual` requires normal unlock. `status --json` provides `awaitingManualUnlock`, `cooldownRemainingSeconds`, `cooldownConfiguredSeconds`, and actionable `blockers`. Missing remaining time may mean guards are still releasing or manual-only policy; use blockers rather than guessing. Exit 75 also applies to calls rejected during cooldown.
 
-In component 0.1.5, `shieldsReleasing: true` in `status --json` means the guards have not yet released, even if the Broker is already `idle`. Wait for release; this is not an installation repair or permission blocker.
+Component 0.1.6 routes synthetic input from the enrolled agent and its same-user descendants through the opaque shields in the original unlocked Broker session. Keep short-lived sending scripts alive briefly (~0.3s) after posting the last global event so the event tap can resolve the sender’s process tree before exit. Physical input and synthetic input from unrelated processes still trigger takeover and exit 75.
+
+Since component 0.1.5, `shieldsReleasing: true` in `status --json` means the guards have not yet released, even if the Broker is already `idle`. Wait for release; this is not an installation repair or permission blocker.
 
 ## Host Integration
 

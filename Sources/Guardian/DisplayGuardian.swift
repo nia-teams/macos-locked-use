@@ -67,6 +67,7 @@ final class DisplayGuardian: NSObject {
     private let unlockCancellation = UnlockCancellation()
     private let lockUIObservation = LockUIObservation()
     private var physicalInput: PhysicalInputMonitor?
+    private var hostProcessFilter: LockedUseHostProcessFilter?
 
     init(session: LockedUseSession, injectWatchdogStall: Bool = false, brokerBootstrap: LockedUseGuardianBootstrap? = nil) throws {
         guard session.state == (brokerBootstrap == nil ? .unlocked : .locked) else {
@@ -80,7 +81,11 @@ final class DisplayGuardian: NSObject {
         lastWatchdogHeartbeat = started
         policy = try .init(session: session, now: started, lifetime: brokerBootstrap == nil ? 15 : 300)
         self.injectWatchdogStall = injectWatchdogStall
-        if brokerBootstrap == nil { policy.confirmQuiescence() }
+        if brokerBootstrap == nil {
+            policy.confirmQuiescence()
+        } else if let approvals = try? LockedUseClientApprovals.loadInstalled() {
+            hostProcessFilter = .init(approvals: approvals, userID: session.userID)
+        }
         super.init()
     }
 
@@ -277,8 +282,15 @@ final class DisplayGuardian: NSObject {
                         recordLockUIClickAdmission(filter: "main", type: type)
                         return true
                     }
-                    // Only the one-use inherited lock-UI capability is admitted.
-                    // Every other global event still requests takeover.
+                    // The production lease starts locked. Pin the same UID and
+                    // audit session while requiring the live session to be unlocked.
+                    let session = guardian.policy.session
+                    if !guardian.stopping,
+                       guardian.hostProcessFilter?.accepts(
+                           sourcePID: Int32(clamping: event.getIntegerValueField(.eventSourceUnixProcessID)),
+                           session: .init(state: .unlocked, userID: session.userID, auditSessionID: session.auditSessionID),
+                           currentSession: LockedUseSession.current(), stopping: guardian.stopping
+                       ) == true { return true }
                     if guardian.policy.phase != .relocking {
                         emit("inputTakeover", details: ["type": type.rawValue,
                             "sourcePID": event.getIntegerValueField(.eventSourceUnixProcessID),
@@ -423,12 +435,21 @@ final class DisplayGuardian: NSObject {
         } catch { stop(.guardianFailure) }
     }
 
-    private func stop(_ reason: LockedUseGuardianPolicy.Reason) {
+    private func markStopping(reason: LockedUseGuardianPolicy.Reason?) {
         clickAllowance?.revoke(); returnAllowance?.revoke()
         fixtureGate.close()
         unlockCancellation.cancel()
         if unlockCancellation.quiesced { unlockWorkPending = false }
-        if !stopping { stopping = true; emit("stopping", details: ["reason": reason.rawValue]) }
+        if policy.localRecoveryReady { shields.allowLocalLoginInput() }
+        else { shields.blockLocalMouseInput() }
+        if !stopping {
+            stopping = true
+            emit("stopping", details: ["reason": reason?.rawValue ?? "", "elapsed": ProcessInfo.processInfo.systemUptime - started])
+        }
+    }
+
+    private func stop(_ reason: LockedUseGuardianPolicy.Reason) {
+        markStopping(reason: reason)
         execute(policy.stop(reason, now: ProcessInfo.processInfo.systemUptime))
     }
 
@@ -436,12 +457,7 @@ final class DisplayGuardian: NSObject {
         for effect in effects {
             switch effect {
             case .requestRelock:
-                fixtureGate.close()
-                unlockCancellation.cancel()
-                if !stopping {
-                    stopping = true
-                    emit("stopping", details: ["reason": policy.reason?.rawValue ?? "", "elapsed": ProcessInfo.processInfo.systemUptime - started])
-                }
+                markStopping(reason: policy.reason)
                 let current = LockedUseSession.current()
                 if current.userID != policy.session.userID || current.auditSessionID != policy.session.auditSessionID || current.state != .locked {
                     lock.request()
@@ -574,7 +590,7 @@ final class DisplayGuardian: NSObject {
             case "requestRelock": stop(.stopRequested)
             case "releaseGuards":
                 policy.confirmQuiescence()
-                execute(policy.stop(.stopRequested, now: ProcessInfo.processInfo.systemUptime))
+                stop(.stopRequested)
             default: throw GuardianError.message("Unknown Broker Guardian effect")
             }
         }

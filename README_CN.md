@@ -254,6 +254,8 @@ func clickAndType(connection: LockedUseConnection) throws {
 
 `status --json` 提供可选字段 `awaitingManualUnlock`、`cooldownRemainingSeconds`（向上取整秒数）、`cooldownConfiguredSeconds` 及 `blockers`。守护尚在释放或处于手动模式时，不输出剩余秒数。配置版本 1 新增 `cooldownSeconds`：字段缺失表示 60，`null` 表示手动模式。恢复记录保存冷却预算上限，进程重启后自首次单调时钟事件按当前配置上限恢复计时。
 
+从 0.1.6 起，遮罩保持不透明，由会话事件过滤器处理鼠标输入。租约期间，仅在原会话已解锁时，已登记的代理及其同用户子进程所发出的合成事件才获准通过；通过验签的宿主应用内、由同一团队签名的辅助程序也可获准。实体设备输入或无法归属的合成事件仍会终止租约并重锁（退出码 75）。开发演练仍在检测到输入时重锁。
+
 自组件 0.1.5 起，Broker 报告守护尚未释放时，`status --json` 显示 `shieldsReleasing: true`，即使 Broker 已回到 `idle`。此时应等待释放，无需重新安装。Broker 会重发释放指令直至收到确认。已验签的 Broker 明确拒绝恢复旧租约时，守护撤盾退出，不再重锁控制台；仅连接失败不会触发撤盾。
 
 ## 安全与风险

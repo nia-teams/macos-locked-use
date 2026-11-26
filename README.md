@@ -254,7 +254,9 @@ An interrupted call relocks the screen and exits **75**; the caller stops the cu
 
 `status --json` exposes optional `awaitingManualUnlock`, `cooldownRemainingSeconds` (integer seconds rounded up), and `cooldownConfiguredSeconds`, plus `blockers`. `cooldownRemainingSeconds` is omitted while guards release or in manual-only mode. Configuration schema 1 adds `cooldownSeconds`: missing means 60; JSON `null` means manual-only. Recovery records persist a bounded cooldown budget rather than countdown ticks; restarting resumes that budget at the first monotonic receipt, capped by the active configuration.
 
-In component 0.1.5, `status --json` reports `shieldsReleasing: true` when the Broker reports unreleased guards, even if its phase is already `idle`. Wait for release rather than reinstalling components. The Broker resends release instructions until acknowledged. When the verified Broker explicitly rejects a recovered lease, the guards release without relocking the console; a connection failure alone does not authorize release.
+In 0.1.6, the shields remain opaque while mouse events are routed by the session filters. During an unlocked Broker lease, both filters admit synthetic input from an enrolled agent or its same-user descendants, including helpers signed by the same team inside the verified host app. Physical input and unattributed synthetic events still stop the lease and trigger relock (exit 75). Development rehearsal still treats any input as takeover.
+
+Since component 0.1.5, `status --json` reports `shieldsReleasing: true` when the Broker reports unreleased guards, even if its phase is already `idle`. Wait for release rather than reinstalling components. The Broker resends release instructions until acknowledged. When the verified Broker explicitly rejects a recovered lease, the guards release without relocking the console; a connection failure alone does not authorize release.
 
 ## Security and Risks
 

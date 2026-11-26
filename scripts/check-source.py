@@ -14,6 +14,37 @@ def read(name):
 
 
 class SourceTests(unittest.TestCase):
+    def test_host_process_input_distinction_and_shield_passthrough(self):
+        host = read("Sources/LockedUseKit/LockedUseHostProcessFilter.swift")
+        for token in ["public struct LockedUseHostProcessFilter", "currentSession == session",
+                      "currentSession.state == .unlocked", "sourcePID > 1", "snapshot.euid == uid",
+                      "maxHops = 16", "maxCacheEntries = 256", "visited.insert(pid).inserted",
+                      "recheck.startSec == snapshot.startSec", "recheck.startUsec == snapshot.startUsec",
+                      "$0.role == .agent", "SecCodeCheckValidity", "SecStaticCodeCheckValidity",
+                      "com.nia-teams.locked-use.guardian", "SecCodeSignatureFlags.runtime", "proc_pidpath"]:
+            self.assertIn(token, host)
+        surface = read("Sources/Guardian/DisplayShieldSurface.swift")
+        stage = surface[surface.index("    private func stageScreens("):surface.index("    func coverageHealthy()")]
+        self.assertLess(stage.index("window.ignoresMouseEvents = true"), stage.index("window.pin(to:"))
+        blocking = surface[surface.index("    func blockLocalMouseInput()"):surface.index("    func allowLocalLoginInput()")]
+        self.assertIn("window.ignoresMouseEvents = false", blocking)
+        for file, allowance, admission, takeover in [
+            ("DisplayGuardian", "guardian.clickAllowance?.accepts(", "guardian.hostProcessFilter?.accepts(", 'emit("inputTakeover"'),
+            ("WatchdogShield", "shield.clickAllowance?.accepts(", "shield.hostProcessFilter?.accepts(", 'shield.stop("filterEvent")'),
+        ]:
+            source = read(f"Sources/Guardian/{file}.swift")
+            for token in ["LockedUseClientApprovals.loadInstalled()", "blockLocalMouseInput()",
+                          "event.getIntegerValueField(.eventSourceUnixProcessID)", "session: .init(state: .unlocked",
+                          "currentSession: LockedUseSession.current()"]:
+                self.assertIn(token, source)
+            self.assertLess(source.index(allowance), source.index(admission))
+            self.assertLess(source.index(admission), source.index(takeover))
+        self.assertIn("if stopping { shield?.markStopping() }", read("Sources/Guardian/GuardianMain.swift"))
+        tests = read("Tests/LockedUseKitTests/LockedUseHostProcessFilterTests.swift")
+        for token in ["testReservedPIDsAndInvalidSession", "testReparentedBundledHelper",
+                      "testGuardianRejection", "testFiftyScrollEvents", "testApprovalDuringProcessExitOrReuse"]:
+            self.assertIn(token, tests)
+
     def test_shield_pinning_and_nonblocking_bounded_repair(self):
         surface = read("Sources/Guardian/DisplayShieldSurface.swift")
         for token in ["private var pinnedFrame: NSRect?", "pinnedFrame ?? frameRect",
@@ -182,7 +213,7 @@ class SourceTests(unittest.TestCase):
         self.assertNotIn('/bin/chmod -h -N', enable)
         self.assertNotIn('--noxattr', enable)
         self.assertNotIn('--norsrc', enable)
-        self.assertEqual(read("VERSION").strip(), "0.1.5")
+        self.assertEqual(read("VERSION").strip(), "0.1.6")
         tests = read("Tests/LockedUseKitTests/LockedUseStagedTreeTests.swift")
         for token in ["testVersionedFramework", "testHelperAndAppRoots", "testAbsoluteEscaping",
                       "testUnsafeModes", "testMutatingACLs", "testRegularFileRoot", "testTrailingSlashTargetsRequireDirectoriesAcrossChains"]:

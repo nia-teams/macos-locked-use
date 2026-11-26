@@ -257,7 +257,7 @@ enum GuardianError: Error { case message(String) }
         app.finishLaunching()
     }
     let shield = persistent ? try WatchdogShield(clickTag: bootstrap?.clickTag, returnTag: bootstrap?.returnTag,
-        startupDeadline: bootstrap?.startupDeadline, stop: stop) : nil
+        startupDeadline: bootstrap?.startupDeadline, initialSession: initial, stop: stop) : nil
     // Unlike the parent, this process drives RunLoop directly instead of
     // NSApplication.run(). Publish the first AppKit frame before health/RPC.
     if persistent { _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05)) }
@@ -273,13 +273,17 @@ enum GuardianError: Error { case message(String) }
         if bytes.contains(72), !stopping, now - lastHeartbeat < 1.5 { lastHeartbeat = now }
         if pipe.failed { stop("parentPipeFailed") }
         else if now - lastHeartbeat >= 1.5 { stop("parentHeartbeatExpired") }
-        if stopping { shield?.cancelNativeClick() }
         let current = LockedUseSession.current()
-        shield?.updateStatus(now: now, session: current, stopping: stopping)
         let same = current.userID == initial.userID && current.auditSessionID == initial.auditSessionID
+        if !stopping, !same || current.state == .unavailable { stop("sessionChanged") }
+        if stopping { shield?.markStopping() }
+        shield?.updateStatus(now: now, session: current, stopping: stopping)
         let healthFailure = shield?.healthFailure
         let protected = healthFailure == nil
-        if let healthFailure { stop(healthFailure) }
+        if let healthFailure {
+            stop(healthFailure)
+            shield?.markStopping()
+        }
         brokerLink?.observe(current, protected: protected, stopping: stopping)
         if brokerLink?.ready == true { _ = HeartbeatPipe.send(82, to: STDOUT_FILENO) }
         // A live, authenticated Broker rejected our previous lease. Unlike
@@ -310,7 +314,7 @@ enum GuardianError: Error { case message(String) }
                 lock.request()
                 lastLock = now
             }
-        } else if !same || current.state == .unavailable { stop("sessionChanged") }
+        }
         _ = HeartbeatPipe.send(72, to: STDOUT_FILENO)
         if persistent { _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1)) }
         else { Thread.sleep(forTimeInterval: 0.1) }
