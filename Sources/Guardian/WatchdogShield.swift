@@ -17,7 +17,6 @@ final class WatchdogShield {
     private var localRecoveryEnabled = false
     private let initialSession: LockedUseSession
     private(set) var isStopping = false
-    private var hostProcessFilter: LockedUseHostProcessFilter?
     private let startupDeadline: TimeInterval?
     private var shieldStatus = LockedUseShieldStatus()
     private let stop: @MainActor (String) -> Void
@@ -27,9 +26,6 @@ final class WatchdogShield {
         self.stop = stop
         self.startupDeadline = startupDeadline
         self.initialSession = initialSession
-        if startupDeadline != nil, let approvals = try? LockedUseClientApprovals.loadInstalled() {
-            hostProcessFilter = .init(approvals: approvals, userID: initialSession.userID)
-        }
         if let returnTag { returnAllowance = .init(tag: returnTag, sender: getppid(), session: initialSession, now: ProcessInfo.processInfo.systemUptime) }
         if let clickTag { clickAllowance = .init(tag: clickTag, sender: getppid(), now: ProcessInfo.processInfo.systemUptime) }
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -54,13 +50,21 @@ final class WatchdogShield {
                                 recordLockUIClickAdmission(filter: "watchdog", type: type)
                                 return true
                             }
-                            let session = shield.initialSession
-                            if !shield.isStopping, type != .tapDisabledByTimeout, type != .tapDisabledByUserInput,
-                               shield.hostProcessFilter?.accepts(
-                                   sourcePID: Int32(clamping: event.getIntegerValueField(.eventSourceUnixProcessID)),
-                                   session: .init(state: .unlocked, userID: session.userID, auditSessionID: session.auditSessionID),
-                                   currentSession: LockedUseSession.current(), stopping: shield.isStopping
-                               ) == true { return true }
+                            if shield.startupDeadline != nil, !shield.isStopping,
+                               type != .tapDisabledByTimeout, type != .tapDisabledByUserInput {
+                                let currentSession = LockedUseSession.current()
+                                let input = shield.monitor?.inputState
+                                if shield.initialSession.admitsSyntheticInput(
+                                    sourcePID: event.getIntegerValueField(.eventSourceUnixProcessID),
+                                    currentSession: currentSession,
+                                    brokerLeaseActive: shield.startupDeadline != nil,
+                                    stopping: shield.isStopping,
+                                    physicalActivityDetected: input?.activityDetected == true,
+                                    physicalMonitorHealthy: input?.healthy == true,
+                                    guardianPID: getppid(),
+                                    watchdogPID: getpid()
+                                ) { return true }
+                            }
                             shield.markStopping()
                             shield.stop("filterEvent")
                             return false

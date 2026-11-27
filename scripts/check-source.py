@@ -14,36 +14,47 @@ def read(name):
 
 
 class SourceTests(unittest.TestCase):
-    def test_host_process_input_distinction_and_shield_passthrough(self):
-        host = read("Sources/LockedUseKit/LockedUseHostProcessFilter.swift")
-        for token in ["public struct LockedUseHostProcessFilter", "currentSession == session",
-                      "currentSession.state == .unlocked", "sourcePID > 1", "snapshot.euid == uid",
-                      "maxHops = 16", "maxCacheEntries = 256", "visited.insert(pid).inserted",
-                      "recheck.startSec == snapshot.startSec", "recheck.startUsec == snapshot.startUsec",
-                      "$0.role == .agent", "SecCodeCheckValidity", "SecStaticCodeCheckValidity",
-                      "com.nia-teams.locked-use.guardian", "SecCodeSignatureFlags.runtime", "proc_pidpath"]:
-            self.assertIn(token, host)
+    def test_physical_vs_synthetic_input_distinction_and_shield_passthrough(self):
+        self.assertFalse((ROOT / "Sources/LockedUseKit/LockedUseHostProcessFilter.swift").exists())
+        self.assertFalse((ROOT / "Tests/LockedUseKitTests/LockedUseHostProcessFilterTests.swift").exists())
+        session = read("Sources/LockedUseKit/LockedUseDiagnostics.swift")
+        admission = session[session.index("    public func admitsSyntheticInput("):session.index("    public static func current()")]
+        for token in ["brokerLeaseActive, !stopping, !physicalActivityDetected, physicalMonitorHealthy",
+                      "guardianPID > 1, watchdogPID > 1",
+                      "let uid = userID, uid > 0, let auditID = auditSessionID, auditID > 0",
+                      "currentSession == .init(state: .unlocked, userID: uid, auditSessionID: auditID)",
+                      "sourcePID > 1", "sourcePID != Int64(guardianPID)", "sourcePID != Int64(watchdogPID)"]:
+            self.assertIn(token, admission)
         surface = read("Sources/Guardian/DisplayShieldSurface.swift")
         stage = surface[surface.index("    private func stageScreens("):surface.index("    func coverageHealthy()")]
         self.assertLess(stage.index("window.ignoresMouseEvents = true"), stage.index("window.pin(to:"))
         blocking = surface[surface.index("    func blockLocalMouseInput()"):surface.index("    func allowLocalLoginInput()")]
         self.assertIn("window.ignoresMouseEvents = false", blocking)
-        for file, allowance, admission, takeover in [
-            ("DisplayGuardian", "guardian.clickAllowance?.accepts(", "guardian.hostProcessFilter?.accepts(", 'emit("inputTakeover"'),
-            ("WatchdogShield", "shield.clickAllowance?.accepts(", "shield.hostProcessFilter?.accepts(", 'shield.stop("filterEvent")'),
+        for file, guard, lease, guardian_pid, watchdog_pid, takeover in [
+            ("DisplayGuardian", "guardian", "guardian.brokerBootstrap != nil", "getpid()",
+             "guardian.watchdog?.processIdentifier ?? 0", 'emit("inputTakeover"'),
+            ("WatchdogShield", "shield", "shield.startupDeadline != nil", "getppid()",
+             "getpid()", 'shield.stop("filterEvent")'),
         ]:
             source = read(f"Sources/Guardian/{file}.swift")
-            for token in ["LockedUseClientApprovals.loadInstalled()", "blockLocalMouseInput()",
-                          "event.getIntegerValueField(.eventSourceUnixProcessID)", "session: .init(state: .unlocked",
-                          "currentSession: LockedUseSession.current()"]:
+            self.assertNotIn("LockedUseClientApprovals.loadInstalled()", source)
+            for token in ["blockLocalMouseInput()", "event.getIntegerValueField(.eventSourceUnixProcessID)",
+                          "LockedUseSession.current()", "physicalActivityDetected: input?.activityDetected == true",
+                          "physicalMonitorHealthy: input?.healthy == true", f"brokerLeaseActive: {lease}",
+                          f"guardianPID: {guardian_pid}", f"watchdogPID: {watchdog_pid}"]:
                 self.assertIn(token, source)
-            self.assertLess(source.index(allowance), source.index(admission))
-            self.assertLess(source.index(admission), source.index(takeover))
+            admission = source.index(".admitsSyntheticInput(")
+            self.assertLess(source.index(f"{guard}.returnAllowance?.accepts("), admission)
+            self.assertLess(source.index(f"{guard}.clickAllowance?.accepts("), admission)
+            self.assertLess(admission, source.index(takeover))
         self.assertIn("if stopping { shield?.markStopping() }", read("Sources/Guardian/GuardianMain.swift"))
-        tests = read("Tests/LockedUseKitTests/LockedUseHostProcessFilterTests.swift")
-        for token in ["testReservedPIDsAndInvalidSession", "testReparentedBundledHelper",
-                      "testGuardianRejection", "testFiftyScrollEvents", "testApprovalDuringProcessExitOrReuse"]:
-            self.assertIn(token, tests)
+        tests = read("Tests/LockedUseKitTests/LockedUseSyntheticInputAdmissionTests.swift")
+        for name in ["testAdmitsArbitraryUserSpacePIDsWithoutProcessLookup", "testRejectsHardwareAndSystemPIDs",
+                     "testGuardPIDsRequireOneShotAllowances", "testRejectsMissingOrReservedGuardPIDs",
+                     "testPhysicalLatchRejectsRemappedSyntheticInput",
+                     "testRejectsUnhealthyStoppingOrRehearsal", "testRejectsLockedUnavailableOrDifferentSession",
+                     "testRejectsMissingOrZeroPinnedIdentityEvenIfSessionsMatch"]:
+            self.assertIn(f"func {name}()", tests)
 
     def test_shield_pinning_and_nonblocking_bounded_repair(self):
         surface = read("Sources/Guardian/DisplayShieldSurface.swift")
@@ -213,7 +224,7 @@ class SourceTests(unittest.TestCase):
         self.assertNotIn('/bin/chmod -h -N', enable)
         self.assertNotIn('--noxattr', enable)
         self.assertNotIn('--norsrc', enable)
-        self.assertEqual(read("VERSION").strip(), "0.1.6")
+        self.assertEqual(read("VERSION").strip(), "0.1.7")
         tests = read("Tests/LockedUseKitTests/LockedUseStagedTreeTests.swift")
         for token in ["testVersionedFramework", "testHelperAndAppRoots", "testAbsoluteEscaping",
                       "testUnsafeModes", "testMutatingACLs", "testRegularFileRoot", "testTrailingSlashTargetsRequireDirectoriesAcrossChains"]:
@@ -451,10 +462,32 @@ class SourceTests(unittest.TestCase):
         self.assertNotRegex(read("README_CN.md"), r"\bCLI\b|mouse-up|自动")
 
     def test_exclusive_hid_patch_and_teardown_are_retained(self):
-        # Exact PR #143 source after extraction; protects the complete fallback,
-        # callback error handling and per-device unschedule/close, not just tokens.
+        # Pin the whole implementation and spell out its worker/fail-closed invariants.
         source = (ROOT / "Sources/Guardian/PhysicalInputMonitor.swift").read_bytes()
-        self.assertEqual(hashlib.sha256(source).hexdigest(), "2dd08bff747d2e56e97b850c736911fdde376f85346d520d3a6820f6c8cc1137")
+        self.assertEqual(hashlib.sha256(source).hexdigest(), "4673841f77331c5838cfc568df1fe4fa0fdb6f21613686eadb6fa896bfe69b96")
+        text = source.decode()
+        for token in ["kHIDUsage_GD_Keyboard", "kHIDUsage_GD_Mouse", "kHIDUsage_GD_Pointer",
+                      "kHIDUsage_Csmr_ConsumerControl", "IOHIDManagerOpen", "kIOReturnExclusiveAccess",
+                      "openDevicesIndividually", "result != kIOReturnSuccess", "IOHIDManagerRegisterDeviceRemovalCallback",
+                      "Thread {", "qualityOfService = .userInteractive", "CFRunLoopGetCurrent()",
+                      "CFRunLoopSourceCreate", "CFRunLoopRun()", "ready.wait()", "NSLock()", "stateLock.withLock",
+                      "nonisolated var activityDetected", "nonisolated var healthy", "DispatchQueue.main.async",
+                      "CFRunLoopPerformBlock(loop", "CFRunLoopStop", "CFRunLoopWakeUp(loop)", "finished.wait()",
+                      "IOHIDDeviceUnscheduleFromRunLoop(device, loop", "IOHIDDeviceClose",
+                      "IOHIDManagerUnscheduleFromRunLoop(manager, loop", "IOHIDManagerClose", "CFRunLoopSourceInvalidate"]:
+            self.assertIn(token, text)
+        self.assertNotIn("CFRunLoopGetMain()", text)
+        self.assertNotIn("DispatchQueue.main.sync", text)
+        self.assertNotIn("state.healthy = true", text)
+        self.assertIn("DispatchQueue.main.async { [weak self] in\n                MainActor.assumeIsolated {", text)
+        run = text[text.index("        private func run()"):text.index("        private func open(on")]
+        self.assertLess(run.index("guard open(on: loop)"), run.index("state.healthy = !state.faulted"))
+        self.assertLess(run.index("state.healthy = !state.faulted"), run.rindex("ready.signal()"))
+        activity = text[text.index("        private func recordActivity()"):text.index("        private func recordFailure()")]
+        failure = text[text.index("        private func recordFailure()"):text.index("        private func notify(")]
+        self.assertLess(activity.index("state.activityDetected = true"), activity.index("notify(failed: false)"))
+        self.assertLess(failure.index("state.faulted = true"), failure.index("state.healthy = false"))
+        self.assertLess(failure.index("state.healthy = false"), failure.index("notify(failed: true)"))
 
     def test_display_wake_and_secondary_coordinates_are_wired(self):
         source = read("Sources/Guardian/DisplayShieldSurface.swift")

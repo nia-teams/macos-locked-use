@@ -16,6 +16,25 @@ public struct LockedUseSession: Equatable, Codable, Sendable {
         self.auditSessionID = auditSessionID
     }
 
+    /// Admit user-space input only in the original unlocked Broker session.
+    /// Guard-owned lock UI probes use their separate one-shot allowances.
+    public func admitsSyntheticInput(
+        sourcePID: Int64,
+        currentSession: LockedUseSession,
+        brokerLeaseActive: Bool,
+        stopping: Bool,
+        physicalActivityDetected: Bool,
+        physicalMonitorHealthy: Bool,
+        guardianPID: Int32,
+        watchdogPID: Int32
+    ) -> Bool {
+        guard brokerLeaseActive, !stopping, !physicalActivityDetected, physicalMonitorHealthy,
+              guardianPID > 1, watchdogPID > 1,
+              let uid = userID, uid > 0, let auditID = auditSessionID, auditID > 0,
+              currentSession == .init(state: .unlocked, userID: uid, auditSessionID: auditID) else { return false }
+        return sourcePID > 1 && sourcePID != Int64(guardianPID) && sourcePID != Int64(watchdogPID)
+    }
+
     public static func current() -> LockedUseSession {
         var sessionID = SecuritySessionId()
         var attributes = SessionAttributeBits()

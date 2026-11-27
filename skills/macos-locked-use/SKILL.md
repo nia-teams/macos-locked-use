@@ -5,7 +5,7 @@ description: Capture windows, click, type, press shortcuts, and run Accessibilit
 
 # macOS Locked Use
 
-During a Locked Use session, all displays remain covered by privacy shields and local physical input takes precedence over automation. Operate applications through window-addressed channels (`locked-use capture / click / type / key` and `AXUIElement` actions), or synthetic global input posted from the enrolled agent’s same-user process tree (component 0.1.6+); physical input and events from unrelated processes are treated as local user input and relock the screen.
+During a Locked Use lease, opaque privacy shields cover all displays and local physical input takes precedence. Use window-addressed commands (`locked-use capture / click / type / key`) or `AXUIElement` actions when the target is known. Component 0.1.7 also supports user-space synthetic mouse and keyboard input in the original unlocked Broker session.
 
 Consecutive commands share a per-user lease (30s idle window, 300s max). Call `locked-use end` when the task finishes.
 
@@ -33,7 +33,7 @@ locked-use end
 
 Recovery policy: `locked-use enable --cooldown <seconds|manual>` accepts finite seconds greater than zero and at most 86400; `manual` requires normal unlock. `status --json` provides `awaitingManualUnlock`, `cooldownRemainingSeconds`, `cooldownConfiguredSeconds`, and actionable `blockers`. Missing remaining time may mean guards are still releasing or manual-only policy; use blockers rather than guessing. Exit 75 also applies to calls rejected during cooldown.
 
-Component 0.1.6 routes synthetic input from the enrolled agent and its same-user descendants through the opaque shields in the original unlocked Broker session. Keep short-lived sending scripts alive briefly (~0.3s) after posting the last global event so the event tap can resolve the sender’s process tree before exit. Physical input and synthetic input from unrelated processes still trigger takeover and exit 75.
+In component 0.1.7, session event taps filter mouse and keyboard input behind the opaque shields. Physical activity latched by `IOHIDManager` on a dedicated high-priority run loop, or a tap event with `sourcePID == 0`, immediately triggers relock and exit 75. While the original Broker session is unlocked and hardware monitoring remains healthy with no physical activity, user-space synthetic events (`sourcePID > 1`, excluding the guards) pass through, including fire-and-forget and background senders. Rehearsal treats all input as takeover.
 
 Since component 0.1.5, `shieldsReleasing: true` in `status --json` means the guards have not yet released, even if the Broker is already `idle`. Wait for release; this is not an installation repair or permission blocker.
 

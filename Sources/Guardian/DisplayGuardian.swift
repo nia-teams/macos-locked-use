@@ -67,7 +67,6 @@ final class DisplayGuardian: NSObject {
     private let unlockCancellation = UnlockCancellation()
     private let lockUIObservation = LockUIObservation()
     private var physicalInput: PhysicalInputMonitor?
-    private var hostProcessFilter: LockedUseHostProcessFilter?
 
     init(session: LockedUseSession, injectWatchdogStall: Bool = false, brokerBootstrap: LockedUseGuardianBootstrap? = nil) throws {
         guard session.state == (brokerBootstrap == nil ? .unlocked : .locked) else {
@@ -83,8 +82,6 @@ final class DisplayGuardian: NSObject {
         self.injectWatchdogStall = injectWatchdogStall
         if brokerBootstrap == nil {
             policy.confirmQuiescence()
-        } else if let approvals = try? LockedUseClientApprovals.loadInstalled() {
-            hostProcessFilter = .init(approvals: approvals, userID: session.userID)
         }
         super.init()
     }
@@ -282,15 +279,20 @@ final class DisplayGuardian: NSObject {
                         recordLockUIClickAdmission(filter: "main", type: type)
                         return true
                     }
-                    // The production lease starts locked. Pin the same UID and
-                    // audit session while requiring the live session to be unlocked.
-                    let session = guardian.policy.session
-                    if !guardian.stopping,
-                       guardian.hostProcessFilter?.accepts(
-                           sourcePID: Int32(clamping: event.getIntegerValueField(.eventSourceUnixProcessID)),
-                           session: .init(state: .unlocked, userID: session.userID, auditSessionID: session.auditSessionID),
-                           currentSession: LockedUseSession.current(), stopping: guardian.stopping
-                       ) == true { return true }
+                    if guardian.brokerBootstrap != nil, !guardian.stopping {
+                        let currentSession = LockedUseSession.current()
+                        let input = guardian.physicalInput?.inputState
+                        if guardian.policy.session.admitsSyntheticInput(
+                            sourcePID: event.getIntegerValueField(.eventSourceUnixProcessID),
+                            currentSession: currentSession,
+                            brokerLeaseActive: guardian.brokerBootstrap != nil,
+                            stopping: guardian.stopping,
+                            physicalActivityDetected: input?.activityDetected == true,
+                            physicalMonitorHealthy: input?.healthy == true,
+                            guardianPID: getpid(),
+                            watchdogPID: guardian.watchdog?.processIdentifier ?? 0
+                        ) { return true }
+                    }
                     if guardian.policy.phase != .relocking {
                         emit("inputTakeover", details: ["type": type.rawValue,
                             "sourcePID": event.getIntegerValueField(.eventSourceUnixProcessID),
